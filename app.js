@@ -54,14 +54,6 @@ document.querySelectorAll(".tab").forEach((t) => {
 });
 $("refresh").addEventListener("click", loadAll);
 
-// tooltip toggling (delegated, works on tap + click)
-document.addEventListener("click", (e) => {
-  if (e.target.classList && e.target.classList.contains("info")) {
-    const tip = e.target.closest("label, .row, div").parentElement.querySelector(".tiptext");
-    if (tip) tip.classList.toggle("hidden");
-  }
-});
-
 // ---------- shared data ----------
 async function latestScan() {
   const { data, error } = await sb.from("scans").select("id,scan_timestamp,universe_slice")
@@ -166,9 +158,9 @@ const METRICS = [
 function buildAnalyzerFields() {
   $("an-fields").innerHTML = METRICS.map((m) => `
     <div>
-      <label class="fld">${m.label}<span class="info" title="${esc(m.tip)}">i</span></label>
-      <div class="tiptext hidden">${esc(m.tip)}</div>
+      <label class="fld">${m.label}</label>
       <input id="${m.id}" type="number" step="${m.step}" value="${m.val}" />
+      <div class="fieldtip">${esc(m.tip)}</div>
     </div>`).join("");
 }
 
@@ -525,8 +517,8 @@ async function loadSettings() {
       <select id="set-slice">${SLICES.map((s) => `<option ${g("default_universe_slice") === s ? "selected" : ""}>${s}</option>`).join("")}</select>
     </div>
     <div class="card" style="border-color:var(--yellow);">
-      <div class="big" style="margin-bottom:6px;">Claude API (metered) <span class="info" title="The qualitative deep-analysis step. Costs money per run. Keep OFF unless you intend to spend.">i</span></div>
-      <div class="tiptext hidden">The qualitative deep-analysis step. Costs money per run. Keep OFF unless you intend to spend.</div>
+      <div class="big" style="margin-bottom:4px;">Claude API (metered)</div>
+      <div class="fieldtip" style="margin-bottom:8px;">The optional deep-analysis step. It costs money each run. Keep OFF unless you intend to spend; the budget cap below is your safety limit.</div>
       <label class="fld">Enabled</label>
       <select id="set-claude"><option value="false" ${!g("claude_api_enabled") ? "selected" : ""}>OFF (default — no spend)</option>
         <option value="true" ${g("claude_api_enabled") ? "selected" : ""}>ON (will incur cost)</option></select>

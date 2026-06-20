@@ -53,10 +53,10 @@
   .center{ text-align:center; }
   .spinner{ color:var(--muted); padding:24px 0; text-align:center; }
   .err{ color:var(--red); } .ok{ color:var(--green); }
-  .info{ display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; margin-left:5px;
-    border:1px solid var(--line); border-radius:50%; font-size:11px; color:var(--muted); cursor:pointer; user-select:none; }
-  .tiptext{ font-size:13px; color:var(--teal); background:var(--panel2); border:1px solid var(--line);
-    border-radius:8px; padding:8px 10px; margin:4px 0 0; }
+  .note{ font-size:13px; color:var(--muted); line-height:1.45; margin:0 2px 10px;
+    padding:9px 11px; background:var(--panel2); border:1px solid var(--line);
+    border-left:3px solid var(--teal); border-radius:8px; }
+  .fieldtip{ font-size:12px; color:var(--dim); line-height:1.35; margin:3px 0 0; }
   .verdict-box{ border-radius:12px; padding:16px; margin-bottom:12px; border:1px solid var(--line); }
   .plan-line{ font-size:16px; margin:6px 0; }
   .plan-line b{ color:var(--text); }
@@ -99,6 +99,7 @@
 
     <!-- CANDIDATES -->
     <section id="view-candidates">
+      <div class="note">Your top picks from the latest scan, best first. <b>Conviction (0–10)</b> = how strongly the strategies agree. Entry / stop / target are suggested price levels — not orders.</div>
       <div class="row between" style="margin-bottom:8px;">
         <div class="muted" id="cand-meta">Latest scan</div>
         <button id="refresh" class="btn secondary small">Refresh</button>
@@ -108,6 +109,7 @@
 
     <!-- BITCOIN -->
     <section id="view-bitcoin" class="hidden">
+      <div class="note">A full read on Bitcoin — trend, halving cycle, sentiment and seasonality combined into one <b>verdict</b>. Higher composite score (0–10) = more favourable. The breakdown shows what's driving it.</div>
       <div id="btc"><div class="spinner">Loading…</div></div>
     </section>
 
@@ -131,6 +133,7 @@
 
     <!-- TRADES -->
     <section id="view-trades" class="hidden">
+      <div class="note">Your paper-trading track record — practice trades with no real money. Log one to test the system, then "Close" it later to record a win or loss.</div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Log a paper trade</div>
         <div class="grid3">
@@ -150,6 +153,7 @@
 
     <!-- PORTFOLIO -->
     <section id="view-portfolio" class="hidden">
+      <div class="note">What you hold and how it's split. Add positions with an <b>account type</b> (TFSA / RRSP / etc.) for tax tracking. Allocation shows each holding's share of the total.</div>
       <div id="p-summary"></div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Add holding</div>
@@ -172,12 +176,13 @@
 
     <!-- SCORECARD -->
     <section id="view-scorecard" class="hidden">
-      <div class="card"><div class="muted">How each of the 7 strategies has voted across all scans so far. Hit-rate vs real outcomes builds up as paper trades close.</div></div>
+      <div class="note">How each of the 7 strategies has voted across all scans. The bar shows its split of <b style="color:var(--green)">buy</b> / <b style="color:var(--yellow)">neutral</b> / <b style="color:var(--red)">avoid</b> calls. Real hit-rate builds up as paper trades close.</div>
       <div id="sc-list"><div class="spinner">Loading…</div></div>
     </section>
 
     <!-- SETTINGS -->
     <section id="view-settings" class="hidden">
+      <div class="note">Control how often scans run, which slice of the market to scan, and your spending. The <b>Claude API</b> step costs money — leave it OFF unless you mean to spend. Saved here, read by the engine on its next run.</div>
       <div id="set-body"><div class="spinner">Loading…</div></div>
     </section>
 
