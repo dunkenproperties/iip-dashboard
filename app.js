@@ -47,11 +47,11 @@ $("send-link").addEventListener("click", async () => {
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
 // ---------- tabs ----------
-const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "tax", "scorecard", "alerts", "settings"];
+const TABS = ["candidates", "bitcoin", "analyzer", "social", "trades", "portfolio", "tax", "scorecard", "alerts", "settings"];
 function activateTab(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
-  const map = { trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
+  const map = { social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
   if (map[name]) map[name]();
   window.scrollTo(0, 0);
 }
@@ -166,6 +166,63 @@ async function loadBitcoin(scan) {
       <div class="fieldtip" style="margin-top:8px;">${esc(snap.cycle_phase)}</div></div>
     ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:4px;">SIGNAL BREAKDOWN</div>
       <div class="fieldtip" style="margin-bottom:12px;">Each driver scored 0–10 (higher = more bullish for Bitcoin):</div>${compRows}</div>` : ""}`;
+}
+
+// ====================================================================
+// SOCIAL (Camillo Google-Trends + Reddit, and Grok/X relay)
+// ====================================================================
+const FLAG_DESC = {
+  "SEARCH BREAKOUT": "Google searches are spiking",
+  "HIGH REDDIT CHATTER": "unusually high Reddit posting",
+  "CONVERGING SIGNAL": "search AND social rising together — the strongest read",
+  "UNUSUAL X ACTIVITY": "abnormal activity on X (Twitter)",
+  "BULLISH ACCELERATION": "bullish chatter speeding up",
+  "VIRAL VOLUME": "viral-level post volume",
+};
+async function loadSocial() {
+  const list = $("social-list");
+  const scan = await latestScan();
+  if (!scan) { list.innerHTML = '<div class="card muted">No scans yet.</div>'; return; }
+  const { data, error } = await sb.from("social_signals")
+    .select("source,social_score,momentum_pct,volume_metric,sentiment,flags,catalyst,assets(symbol,name)")
+    .eq("scan_id", scan.id);
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  if (!data.length) { list.innerHTML = '<div class="card muted">No social signals in the latest scan.</div>'; return; }
+
+  // group rows per ticker
+  const byTicker = {};
+  data.forEach((r) => {
+    const sym = (r.assets || {}).symbol || "?";
+    const g = byTicker[sym] || (byTicker[sym] = { sym, name: (r.assets || {}).name, trends: null, reddit: null, grok: null });
+    if (r.source === "trends") g.trends = r;
+    else if (r.source === "reddit") g.reddit = r;
+    else if (r.source === "grok_x") g.grok = r;
+  });
+  const score = (g) => Number((g.trends && g.trends.social_score) ?? (g.grok && g.grok.social_score) ?? (g.reddit && g.reddit.social_score) ?? 0);
+  const groups = Object.values(byTicker).sort((a, b) => score(b) - score(a));
+
+  list.innerHTML = groups.map((g) => {
+    const s = score(g);
+    const flags = (g.trends && g.trends.flags && g.trends.flags.flags) || (g.grok && g.grok.flags && g.grok.flags.flags) || [];
+    const mom = g.trends ? g.trends.momentum_pct : null;
+    const posts = g.reddit ? g.reddit.volume_metric : null;
+    const flagPills = flags.map((f) => `<span class="pill" style="background:rgba(0,255,135,.10); color:var(--green); margin-right:6px;">${esc(f)}</span>`).join("");
+    const flagExpl = flags.length ? `<div class="fieldtip">${flags.map((f) => esc(f) + " = " + esc(FLAG_DESC[f] || "")).join("; ")}.</div>` : "";
+    const grok = g.grok ? `<div class="fieldtip" style="margin-top:8px;"><b>X (Twitter):</b> ${esc(g.grok.sentiment || "n/a")} sentiment, score ${num(g.grok.social_score, 1)}/10${g.grok.catalyst && g.grok.catalyst !== "none" ? " — catalyst: " + esc(g.grok.catalyst) : ""}.</div>` : "";
+    return `<div class="card">
+      <div class="row between">
+        <div><span class="tk">${esc(g.sym)}</span> <span class="nm">${esc(g.name || "")}</span></div>
+        <div class="center"><div class="big" style="color:${convColor(s)}">${s.toFixed(1)}<span class="dim" style="font-size:13px;"> / 10</span></div></div></div>
+      <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div>
+      <div class="fieldtip" style="margin-top:6px;">Social score 0–10 — how unusual the public attention is right now. Higher = a stronger "something's happening" signal.</div>
+      <div class="grid2" style="margin-top:10px;">
+        <div class="stat"><div class="k">Search momentum</div><div class="v" style="color:${mom > 0 ? "var(--green)" : "var(--muted)"}">${mom == null ? "—" : pct(mom, 0)}</div></div>
+        <div class="stat"><div class="k">Reddit posts / week</div><div class="v">${posts == null ? "—" : num(posts, 0)}</div></div></div>
+      <div class="fieldtip"><b>Search momentum</b>: change in Google search interest vs prior weeks — big jumps can precede real demand. <b>Reddit posts/week</b>: how much people are posting about it.</div>
+      ${flagPills ? `<div style="margin-top:10px;">${flagPills}</div>${flagExpl}` : ""}
+      ${grok}
+    </div>`;
+  }).join("");
 }
 
 // ====================================================================
@@ -751,6 +808,18 @@ async function loadSettings() {
   const freqs = g("scan_frequencies", {});
   const channels = g("alert_channels", {});
 
+  // Claude API spend this month (spec §2.8 — cost visible in the dashboard)
+  const cap = Number(g("monthly_budget_cap", 25));
+  const monthStart = new Date(); monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+  let spent = 0, calls = 0;
+  try {
+    const { data: costs } = await sb.from("api_costs").select("cost_usd").gte("call_timestamp", monthStart.toISOString());
+    calls = (costs || []).length;
+    spent = (costs || []).reduce((s, c) => s + (Number(c.cost_usd) || 0), 0);
+  } catch (e) { /* table readable once logged in */ }
+  const pctUsed = cap ? Math.min(100, (spent / cap) * 100) : 0;
+  const spendColor = pctUsed >= 100 ? "var(--red)" : pctUsed >= Number(g("budget_alert_threshold_pct", 75)) ? "var(--yellow)" : "var(--green)";
+
   const freqSel = (src) => `<div><label class="fld">${src[0].toUpperCase() + src.slice(1)}</label>
     <select data-freq="${src}">${FREQ.map((f) => `<option ${freqs[src] === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
 
@@ -777,6 +846,19 @@ async function loadSettings() {
       </div>
     </div>
     <div class="card">
+      <div class="big" style="margin-bottom:6px;">Claude API spend this month</div>
+      <div class="row between"><div class="xl" style="color:${spendColor}">$${spent.toFixed(2)}</div>
+        <div class="muted" style="text-align:right;">of $${cap.toFixed(2)} cap<br><span class="dim">${calls} call${calls === 1 ? "" : "s"}</span></div></div>
+      <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${pctUsed}%; background:${spendColor}"></div></div>
+      <div class="fieldtip" style="margin-top:6px;">The only part of the system that costs money. Spend stops automatically at the cap; you're alerted at ${g("budget_alert_threshold_pct", 75)}%.</div>
+    </div>
+    <div class="card">
+      <div class="big" style="margin-bottom:6px;">Run Deep Analysis <span class="dim" style="font-size:13px;">(uses Claude API — metered)</span></div>
+      <div class="fieldtip" style="margin-bottom:10px;">Runs the 4 qualitative frameworks (Wood, Thiel, Shiller, Camillo) on the latest scan's top candidates using the Claude API. It's <b>off by default</b> and never runs automatically — it only spends when you start it, and it stops at your cap.</div>
+      <button id="set-deep" class="btn" ${g("claude_api_enabled") ? "" : "disabled"} style="width:100%;">Run Deep Analysis now</button>
+      <div id="set-deep-msg" class="fieldtip" style="margin-top:8px;">${g("claude_api_enabled") ? "" : "Turn Claude API ON above and save, then this button activates."}</div>
+    </div>
+    <div class="card">
       <div class="big" style="margin-bottom:6px;">Alerts</div>
       <div class="grid2">
         <div><label class="fld">Email alerts</label><select id="set-email"><option value="false" ${!channels.email_enabled ? "selected" : ""}>Off</option><option value="true" ${channels.email_enabled ? "selected" : ""}>On</option></select></div>
@@ -791,6 +873,12 @@ async function loadSettings() {
     </div>`;
 
   $("set-save").addEventListener("click", saveSettings);
+  const deep = $("set-deep");
+  if (deep) deep.addEventListener("click", () => {
+    $("set-deep-msg").innerHTML = "Deep analysis runs in the engine (where the Claude key lives), not from this page. "
+      + "It runs on demand via <code>python -m engine.run_qualitative</code>, and on-demand triggering from this button "
+      + "turns on once the scan engine is deployed. Your budget cap and the alert threshold apply automatically.";
+  });
 }
 async function saveSettings() {
   const msg = $("set-msg");

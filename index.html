@@ -69,7 +69,7 @@
   @media print{
     body{ background:#fff; color:#000; }
     .tabs, .brand, #login, #set-body, .note, #tax-year, #tax-csv, #tax-print, #logout,
-    #view-candidates, #view-bitcoin, #view-analyzer, #view-trades, #view-portfolio,
+    #view-candidates, #view-bitcoin, #view-analyzer, #view-social, #view-trades, #view-portfolio,
     #view-scorecard, #view-alerts, #view-settings { display:none !important; }
     #view-tax, #tax-body{ display:block !important; }
     table.tax th, table.tax td{ border-color:#999; color:#000; }
@@ -104,6 +104,7 @@
       <div class="tab active" data-tab="candidates">Candidates</div>
       <div class="tab" data-tab="bitcoin">Bitcoin</div>
       <div class="tab" data-tab="analyzer">Analyzer</div>
+      <div class="tab" data-tab="social">Social</div>
       <div class="tab" data-tab="trades">Trades</div>
       <div class="tab" data-tab="portfolio">Portfolio</div>
       <div class="tab" data-tab="tax">Tax</div>
@@ -145,6 +146,12 @@
         <button id="run-analyzer" class="btn" style="width:100%;">Analyze</button>
       </div>
       <div id="analyzer-result" class="hidden"></div>
+    </section>
+
+    <!-- SOCIAL -->
+    <section id="view-social" class="hidden">
+      <div class="note"><b>Social signals</b> — what ordinary people are searching for and posting about, often <i>before</i> it shows up in the financials (Chris Camillo's "social arbitrage"). A higher score = more unusual, fast-rising attention worth a closer look.</div>
+      <div id="social-list"><div class="spinner">Loading…</div></div>
     </section>
 
     <!-- TRADES -->
