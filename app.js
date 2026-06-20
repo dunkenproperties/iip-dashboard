@@ -797,6 +797,15 @@ async function addAlert() {
 // ====================================================================
 const FREQ = ["manual", "minute", "hourly", "daily", "weekly", "monthly", "off"];
 const SLICES = ["full", "top100", "top50", "top25", "movers", "watchlist", "sector", "custom"];
+// Claude models selectable for the metered deep-analysis step. Sonnet is the default
+// (good balance of quality and cost); Opus is the most capable.
+// TO ADD A NEW MODEL: add one {id,label} here and one pricing line in engine/qualitative.py PRICING.
+const MODELS = [
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — balanced (default)" },
+  { id: "claude-opus-4-8", label: "Opus 4.8 — most capable (pricier)" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5 — fastest/cheapest" },
+];
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 let SETTINGS_CACHE = {};
 
 async function loadSettings() {
@@ -840,6 +849,9 @@ async function loadSettings() {
       <label class="fld">Enabled</label>
       <select id="set-claude"><option value="false" ${!g("claude_api_enabled") ? "selected" : ""}>OFF (default — no spend)</option>
         <option value="true" ${g("claude_api_enabled") ? "selected" : ""}>ON (will incur cost)</option></select>
+      <label class="fld">Model</label>
+      <select id="set-model">${MODELS.map((m) => `<option value="${m.id}" ${g("claude_model", DEFAULT_MODEL) === m.id ? "selected" : ""}>${m.label}</option>`).join("")}</select>
+      <div class="fieldtip" style="margin-top:4px;">Which Claude model the deep-analysis step uses. Sonnet is the default; Opus is sharper but costs more.</div>
       <div class="grid2" style="margin-top:6px;">
         <div><label class="fld">Monthly budget cap $</label><input id="set-cap" type="number" step="0.01" value="${g("monthly_budget_cap", 25)}" /></div>
         <div><label class="fld">Alert at % of budget</label><input id="set-alertpct" type="number" value="${g("budget_alert_threshold_pct", 75)}" /></div>
@@ -893,6 +905,7 @@ async function saveSettings() {
       { key: "scan_frequencies", value: freqs },
       { key: "default_universe_slice", value: $("set-slice").value },
       { key: "claude_api_enabled", value: $("set-claude").value === "true" },
+      { key: "claude_model", value: $("set-model").value },
       { key: "monthly_budget_cap", value: parseFloat($("set-cap").value) || 0 },
       { key: "budget_alert_threshold_pct", value: parseFloat($("set-alertpct").value) || 0 },
       { key: "alert_channels", value: channels },
