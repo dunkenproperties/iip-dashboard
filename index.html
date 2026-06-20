@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+<title>IIP — Investment Intelligence</title>
+<style>
+  :root{
+    --bg:#0b0f0d; --panel:#121815; --panel2:#0f1411; --line:#1f2a24;
+    --green:#00ff87; --teal:#39d8c8; --yellow:#ffd93d; --red:#ff5d5d;
+    --text:#e8f0ec; --muted:#9fb1a8; --dim:#5f726a;
+  }
+  *{box-sizing:border-box;}
+  html{ -webkit-text-size-adjust:100%; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:17px; line-height:1.5;
+  }
+  a{ color:var(--teal); }
+  .wrap{ max-width:880px; margin:0 auto; padding:16px; }
+  .brand{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 2px 14px; }
+  .logo{ font-weight:800; letter-spacing:3px; color:var(--green); font-size:18px; }
+  .muted{ color:var(--muted); } .dim{ color:var(--dim); }
+  .btn{ background:var(--green); color:#04140c; border:0; border-radius:9px;
+        padding:12px 16px; font-size:17px; font-weight:700; cursor:pointer; font-family:inherit; }
+  .btn.secondary{ background:transparent; color:var(--text); border:1px solid var(--line); }
+  .btn:disabled{ opacity:.5; cursor:default; }
+  input{ width:100%; padding:13px 14px; font-size:17px; border-radius:9px;
+         border:1px solid var(--line); background:var(--panel2); color:var(--text); font-family:inherit; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+  .row{ display:flex; align-items:center; gap:10px; }
+  .between{ justify-content:space-between; }
+  .tk{ font-weight:800; font-size:19px; }
+  .nm{ color:var(--muted); font-size:14px; }
+  .pill{ font-size:12px; font-weight:700; padding:3px 9px; border-radius:999px; letter-spacing:.4px; }
+  .big{ font-size:26px; font-weight:700; }
+  .hidden{ display:none !important; }
+  /* tabs */
+  .tabs{ display:flex; gap:6px; position:sticky; top:0; background:var(--bg); padding:8px 0; z-index:5; flex-wrap:wrap; }
+  .tab{ flex:1; min-width:90px; text-align:center; padding:11px 8px; border-radius:9px; border:1px solid var(--line);
+        background:var(--panel2); color:var(--muted); font-weight:700; cursor:pointer; font-size:15px; }
+  .tab.active{ background:var(--green); color:#04140c; border-color:var(--green); }
+  .bar{ height:8px; border-radius:999px; background:var(--panel2); overflow:hidden; }
+  .fill{ height:100%; }
+  .grid4{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .grid2{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .stat .k{ font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.5px; }
+  .stat .v{ font-size:18px; font-weight:700; }
+  label.fld{ display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  .center{ text-align:center; }
+  .spinner{ color:var(--muted); padding:24px 0; text-align:center; }
+  .err{ color:var(--red); }
+  .ok{ color:var(--green); }
+  @media (max-width:560px){ .grid4{ grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand">
+    <span class="logo">◆ IIP</span>
+    <span id="hdr-right" class="dim" style="font-size:13px;"></span>
+  </div>
+
+  <!-- LOGIN -->
+  <div id="login">
+    <div class="card">
+      <div class="big" style="margin-bottom:6px;">Sign in</div>
+      <div class="muted" style="margin-bottom:14px;">
+        Private dashboard. Enter your email and we'll send a one-click login link.
+      </div>
+      <label class="fld">Email</label>
+      <input id="email" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" />
+      <div style="height:12px;"></div>
+      <button id="send-link" class="btn" style="width:100%;">Email me a login link</button>
+      <div id="login-msg" class="center" style="margin-top:12px; font-size:14px;"></div>
+    </div>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="hidden">
+    <div class="tabs">
+      <div class="tab active" data-tab="candidates">Candidates</div>
+      <div class="tab" data-tab="bitcoin">Bitcoin</div>
+      <div class="tab" data-tab="analyzer">Analyzer</div>
+    </div>
+
+    <div style="height:8px;"></div>
+
+    <!-- CANDIDATES -->
+    <section id="view-candidates">
+      <div class="row between" style="margin-bottom:8px;">
+        <div class="muted" id="cand-meta">Latest scan</div>
+        <button id="refresh" class="btn secondary" style="padding:7px 12px; font-size:14px;">Refresh</button>
+      </div>
+      <div id="cand-list"><div class="spinner">Loading…</div></div>
+    </section>
+
+    <!-- BITCOIN -->
+    <section id="view-bitcoin" class="hidden">
+      <div id="btc"><div class="spinner">Loading…</div></div>
+    </section>
+
+    <!-- ANALYZER -->
+    <section id="view-analyzer" class="hidden">
+      <div class="card">
+        <div class="big" style="margin-bottom:4px;">7-framework analyzer</div>
+        <div class="muted" style="margin-bottom:8px;">Manual input → convergence read. Runs locally; nothing saved.</div>
+        <div class="grid2">
+          <div><label class="fld">Revenue growth % (YoY)</label><input id="in-rev" type="number" value="10" /></div>
+          <div><label class="fld">Earnings growth % (YoY)</label><input id="in-eps" type="number" value="15" /></div>
+          <div><label class="fld">Gross margin %</label><input id="in-margin" type="number" value="45" /></div>
+          <div><label class="fld">FCF yield %</label><input id="in-fcf" type="number" value="4" /></div>
+          <div><label class="fld">Relative strength % (12m)</label><input id="in-rel" type="number" value="20" /></div>
+          <div><label class="fld">RSI (14)</label><input id="in-rsi" type="number" value="55" /></div>
+          <div><label class="fld">Debt / equity (ratio)</label><input id="in-de" type="number" step="0.1" value="0.5" /></div>
+          <div><label class="fld">Price vs MA %</label><input id="in-ma" type="number" value="8" /></div>
+        </div>
+        <div style="height:12px;"></div>
+        <button id="run-analyzer" class="btn" style="width:100%;">Run analysis</button>
+      </div>
+      <div id="analyzer-result" class="hidden">
+        <div class="card">
+          <div class="row between">
+            <div><div class="dim" style="font-size:12px;">VERDICT</div><div id="an-verdict" class="big">—</div></div>
+            <div class="center"><div class="dim" style="font-size:12px;">AVG</div><div id="an-avg" class="big">—</div></div>
+          </div>
+        </div>
+        <div id="an-list"></div>
+      </div>
+    </section>
+
+    <div class="center" style="margin:20px 0 8px;">
+      <button id="logout" class="btn secondary" style="font-size:14px;">Sign out</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="./config.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
