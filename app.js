@@ -1,34 +1,28 @@
-/* IIP dashboard — reads Supabase only (spec §7). Magic-link auth; RLS keeps data
-   private to the owner. Tabs: Candidates, Bitcoin, Analyzer (build §8 step 4). */
+/* IIP dashboard — reads/writes Supabase only (spec §7). Magic-link auth; RLS keeps
+   data private to the owner. Tabs: Candidates, Bitcoin, Analyzer, Trades, Portfolio,
+   Scorecard, Settings. */
 
 const cfg = window.IIP_CONFIG;
 const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
-
 const $ = (id) => document.getElementById(id);
-const el = (sel) => document.querySelector(sel);
 
-// ---------- helpers ----------
-const money = (v) => (v == null ? "—" : "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+// ---------- format helpers ----------
+const money = (v) => (v == null || v === "" ? "—" : "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
 const num = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
 const pct = (v, d = 1) => (v == null ? "—" : (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%");
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 const ACTION_COLOR = { buy: "var(--green)", watch: "var(--teal)", wait: "var(--yellow)", avoid: "var(--red)" };
-const VERDICT_COLOR = { BUY: "var(--green)", NEUTRAL: "var(--yellow)", AVOID: "var(--red)" };
-
-function convColor(score) {
-  if (score >= 7) return "var(--green)";
-  if (score >= 5.5) return "var(--teal)";
-  if (score >= 4) return "var(--yellow)";
-  return "var(--red)";
-}
+const VERDICT_COLOR = { BUY: "var(--green)", NEUTRAL: "var(--yellow)", AVOID: "var(--red)", WAIT: "var(--yellow)" };
+function convColor(s) { return s >= 7 ? "var(--green)" : s >= 5.5 ? "var(--teal)" : s >= 4 ? "var(--yellow)" : "var(--red)"; }
 
 // ---------- auth ----------
 async function init() {
   const { data: { session } } = await sb.auth.getSession();
   showAuth(session);
   sb.auth.onAuthStateChange((_e, s) => showAuth(s));
+  buildAnalyzerFields();
 }
-
 function showAuth(session) {
   const authed = !!session;
   $("login").classList.toggle("hidden", authed);
@@ -36,203 +30,548 @@ function showAuth(session) {
   $("hdr-right").textContent = authed ? (session.user.email || "") : "";
   if (authed) loadAll();
 }
-
 $("send-link").addEventListener("click", async () => {
   const email = $("email").value.trim();
   const msg = $("login-msg");
   if (!email) { msg.innerHTML = '<span class="err">Enter your email.</span>'; return; }
-  $("send-link").disabled = true;
-  msg.textContent = "Sending…";
-  const { error } = await sb.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: location.origin + location.pathname },
-  });
+  $("send-link").disabled = true; msg.textContent = "Sending…";
+  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
   $("send-link").disabled = false;
-  msg.innerHTML = error
-    ? `<span class="err">${error.message}</span>`
-    : '<span class="ok">Check your email and click the login link.</span>';
+  msg.innerHTML = error ? `<span class="err">${esc(error.message)}</span>` : '<span class="ok">Check your email and click the login link.</span>';
 });
-
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
 // ---------- tabs ----------
+const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "scorecard", "settings"];
 document.querySelectorAll(".tab").forEach((t) => {
   t.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
     t.classList.add("active");
-    ["candidates", "bitcoin", "analyzer"].forEach((v) =>
-      $("view-" + v).classList.toggle("hidden", v !== t.dataset.tab)
-    );
+    TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== t.dataset.tab));
+    const map = { trades: loadTrades, portfolio: loadPortfolio, scorecard: loadScorecard, settings: loadSettings };
+    if (map[t.dataset.tab]) map[t.dataset.tab]();
   });
 });
-
 $("refresh").addEventListener("click", loadAll);
 
-// ---------- data ----------
+// tooltip toggling (delegated, works on tap + click)
+document.addEventListener("click", (e) => {
+  if (e.target.classList && e.target.classList.contains("info")) {
+    const tip = e.target.closest("label, .row, div").parentElement.querySelector(".tiptext");
+    if (tip) tip.classList.toggle("hidden");
+  }
+});
+
+// ---------- shared data ----------
 async function latestScan() {
-  const { data, error } = await sb
-    .from("scans")
-    .select("id,scan_timestamp,universe_slice")
-    .eq("status", "complete")
-    .order("scan_timestamp", { ascending: false })
-    .limit(1);
+  const { data, error } = await sb.from("scans").select("id,scan_timestamp,universe_slice")
+    .eq("status", "complete").order("scan_timestamp", { ascending: false }).limit(1);
   if (error) throw error;
   return data && data[0];
+}
+async function findOrCreateAsset(symbol) {
+  symbol = symbol.toUpperCase().trim();
+  const { data } = await sb.from("assets").select("id").eq("symbol", symbol).eq("asset_type", "stock").limit(1);
+  if (data && data[0]) return data[0].id;
+  const { data: ins, error } = await sb.from("assets").insert({ symbol, asset_type: "stock" }).select("id");
+  if (error) throw error;
+  return ins[0].id;
 }
 
 async function loadAll() {
   try {
     const scan = await latestScan();
     await Promise.all([loadCandidates(scan), loadBitcoin(scan)]);
-  } catch (e) {
-    $("cand-list").innerHTML = `<div class="card err">Error: ${e.message}</div>`;
-  }
+  } catch (e) { $("cand-list").innerHTML = `<div class="card err">Error: ${esc(e.message)}</div>`; }
 }
 
+// ---------- Candidates ----------
 async function loadCandidates(scan) {
-  const meta = $("cand-meta");
-  const list = $("cand-list");
+  const meta = $("cand-meta"), list = $("cand-list");
   if (!scan) { meta.textContent = "No scans yet"; list.innerHTML = '<div class="card muted">Run a scan to see candidates.</div>'; return; }
-
   meta.textContent = `Latest scan · ${new Date(scan.scan_timestamp).toLocaleString()} · ${scan.universe_slice}`;
-  const { data, error } = await sb
-    .from("recommendations")
-    .select("conviction,action,entry_target,stop_loss,exit_target,position_size_pct,time_horizon,rationale,assets(symbol,name,sector)")
-    .eq("scan_id", scan.id)
-    .order("conviction", { ascending: false });
-  if (error) { list.innerHTML = `<div class="card err">${error.message}</div>`; return; }
+  const { data, error } = await sb.from("recommendations")
+    .select("conviction,action,entry_target,stop_loss,exit_target,position_size_pct,rationale,assets(symbol,name,sector)")
+    .eq("scan_id", scan.id).order("conviction", { ascending: false });
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
   if (!data.length) { list.innerHTML = '<div class="card muted">No recommendations in the latest scan.</div>'; return; }
-
   list.innerHTML = data.map((r, i) => {
-    const a = r.assets || {};
-    const c = Number(r.conviction);
-    return `<div class="card">
-      <div class="row between">
-        <div class="row" style="gap:12px;">
-          <span class="dim" style="width:18px;">${i + 1}</span>
-          <div>
-            <span class="tk">${a.symbol || "?"}</span>
-            <div class="nm">${a.name || ""}${a.sector ? " · " + a.sector : ""}</div>
-          </div>
-        </div>
-        <div class="center">
-          <div class="big" style="color:${convColor(c)}">${c.toFixed(2)}</div>
-          <span class="pill" style="background:rgba(255,255,255,.06); color:${ACTION_COLOR[r.action] || "var(--muted)"}">${(r.action || "").toUpperCase()}</span>
-        </div>
-      </div>
+    const a = r.assets || {}, c = Number(r.conviction);
+    return `<div class="card"><div class="row between">
+      <div class="row" style="gap:12px;"><span class="dim" style="width:18px;">${i + 1}</span>
+        <div><span class="tk">${esc(a.symbol)}</span><div class="nm">${esc(a.name)}${a.sector ? " · " + esc(a.sector) : ""}</div></div></div>
+      <div class="center"><div class="big" style="color:${convColor(c)}">${c.toFixed(2)}</div>
+        <span class="pill" style="background:rgba(255,255,255,.06); color:${ACTION_COLOR[r.action] || "var(--muted)"}">${esc((r.action || "").toUpperCase())}</span></div></div>
       <div class="grid4" style="margin-top:12px;">
         <div class="stat"><div class="k">Entry</div><div class="v">${money(r.entry_target)}</div></div>
         <div class="stat"><div class="k">Stop</div><div class="v" style="color:var(--red)">${money(r.stop_loss)}</div></div>
         <div class="stat"><div class="k">Target</div><div class="v" style="color:var(--green)">${money(r.exit_target)}</div></div>
-        <div class="stat"><div class="k">Size</div><div class="v">${num(r.position_size_pct, 2)}%</div></div>
-      </div>
-      ${r.rationale ? `<div class="muted" style="margin-top:10px; font-size:14px;">${r.rationale}</div>` : ""}
-    </div>`;
+        <div class="stat"><div class="k">Size</div><div class="v">${num(r.position_size_pct, 2)}%</div></div></div>
+      ${r.rationale ? `<div class="muted" style="margin-top:10px; font-size:14px;">${esc(r.rationale)}</div>` : ""}</div>`;
   }).join("");
 }
 
+// ---------- Bitcoin ----------
 async function loadBitcoin(scan) {
-  const box = $("btc");
-  let snap = null;
-  if (scan) {
-    const { data } = await sb.from("bitcoin_snapshots").select("*").eq("scan_id", scan.id).limit(1);
-    snap = data && data[0];
-  }
-  if (!snap) {
-    const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1);
-    snap = data && data[0];
-  }
+  const box = $("btc"); let snap = null;
+  if (scan) { const { data } = await sb.from("bitcoin_snapshots").select("*").eq("scan_id", scan.id).limit(1); snap = data && data[0]; }
+  if (!snap) { const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1); snap = data && data[0]; }
   if (!snap) { box.innerHTML = '<div class="card muted">No Bitcoin snapshot yet.</div>'; return; }
-
   const comp = (snap.raw && snap.raw.components) || {};
   const compRows = Object.entries(comp).map(([k, v]) => {
     const s = Number(v.score || 0);
-    return `<div style="margin-bottom:10px;">
-      <div class="row between" style="font-size:14px;"><span style="text-transform:capitalize;">${k}</span><span class="muted">${num(s, 1)} · ${v.note || ""}</span></div>
-      <div class="bar"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div>
-    </div>`;
+    return `<div style="margin-bottom:10px;"><div class="row between" style="font-size:14px;">
+      <span style="text-transform:capitalize;">${esc(k)}</span><span class="muted">${num(s, 1)} · ${esc(v.note)}</span></div>
+      <div class="bar"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div></div>`;
   }).join("");
-
   box.innerHTML = `
-    <div class="card">
-      <div class="row between">
-        <div><div class="dim" style="font-size:12px;">BITCOIN</div><div class="big">${money(snap.price)}</div></div>
-        <div class="center"><div class="dim" style="font-size:12px;">VERDICT</div>
-          <div class="big" style="color:${convColor(Number(snap.composite_score))}">${snap.verdict || "—"}</div></div>
-      </div>
-      <div class="muted" style="margin-top:8px;">${snap.position_guidance || ""}</div>
-    </div>
-    <div class="card">
-      <div class="grid4">
-        <div class="stat"><div class="k">Composite</div><div class="v" style="color:${convColor(Number(snap.composite_score))}">${num(snap.composite_score, 1)}/10</div></div>
-        <div class="stat"><div class="k">RSI 14</div><div class="v">${num(snap.rsi_14, 0)}</div></div>
-        <div class="stat"><div class="k">vs ATH</div><div class="v">${pct(snap.ath_change_pct)}</div></div>
-        <div class="stat"><div class="k">Fear/Greed</div><div class="v">${num(snap.fear_greed, 0)}</div></div>
-        <div class="stat"><div class="k">50d MA</div><div class="v">${money(snap.ma_50)}</div></div>
-        <div class="stat"><div class="k">200d MA</div><div class="v">${money(snap.ma_200)}</div></div>
-      </div>
-      <div class="muted" style="margin-top:12px; font-size:14px;">${snap.cycle_phase || ""}</div>
-    </div>
-    ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:10px;">SIGNAL BREAKDOWN</div>${compRows}</div>` : ""}
-  `;
+    <div class="card"><div class="row between">
+      <div><div class="dim" style="font-size:12px;">BITCOIN</div><div class="big">${money(snap.price)}</div></div>
+      <div class="center"><div class="dim" style="font-size:12px;">VERDICT</div>
+        <div class="big" style="color:${convColor(Number(snap.composite_score))}">${esc(snap.verdict)}</div></div></div>
+      <div class="muted" style="margin-top:8px;">${esc(snap.position_guidance)}</div></div>
+    <div class="card"><div class="grid4">
+      <div class="stat"><div class="k">Composite</div><div class="v" style="color:${convColor(Number(snap.composite_score))}">${num(snap.composite_score, 1)}/10</div></div>
+      <div class="stat"><div class="k">RSI 14</div><div class="v">${num(snap.rsi_14, 0)}</div></div>
+      <div class="stat"><div class="k">vs ATH</div><div class="v">${pct(snap.ath_change_pct)}</div></div>
+      <div class="stat"><div class="k">Fear/Greed</div><div class="v">${num(snap.fear_greed, 0)}</div></div>
+      <div class="stat"><div class="k">50d MA</div><div class="v">${money(snap.ma_50)}</div></div>
+      <div class="stat"><div class="k">200d MA</div><div class="v">${money(snap.ma_200)}</div></div></div>
+      <div class="muted" style="margin-top:12px; font-size:14px;">${esc(snap.cycle_phase)}</div></div>
+    ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:10px;">SIGNAL BREAKDOWN</div>${compRows}</div>` : ""}`;
 }
 
-// ---------- analyzer (ported verbatim from IIP_Command_Center.html frameworks()) ----------
+// ====================================================================
+// ANALYZER — plain-English verdict + trade plan + metric tooltips
+// ====================================================================
+const METRICS = [
+  { id: "in-rev", key: "rev", label: "Revenue growth % (YoY)", val: 10, step: "any",
+    tip: "How fast sales are growing vs a year ago. Higher is better; negative means the business is shrinking." },
+  { id: "in-eps", key: "eps", label: "Earnings growth % (YoY)", val: 15, step: "any",
+    tip: "How fast profits are growing vs a year ago. Higher is better; 20–50% is strong growth; below 0 means profits are falling." },
+  { id: "in-margin", key: "margin", label: "Gross margin %", val: 45, step: "any",
+    tip: "Profit kept from each dollar of sales before overhead. Higher = stronger pricing power. Over 40% is strong, under 20% is thin." },
+  { id: "in-fcf", key: "fcf", label: "Free cash flow yield %", val: 4, step: "any",
+    tip: "Spare cash the company generates compared with its price. Higher = better value. Above 4% is healthy, under 1% is weak." },
+  { id: "in-rel", key: "rel", label: "Relative strength % (12m)", val: 20, step: "any",
+    tip: "Price change over the last year. Positive = uptrend; strongly positive (>30%) = a market leader; very negative = a laggard." },
+  { id: "in-rsi", key: "rsi", label: "RSI (14)", val: 55, step: "any",
+    tip: "Momentum gauge from 0–100. Below 30 = oversold (possibly cheap), above 70 = overbought (possibly stretched), ~50 is neutral." },
+  { id: "in-de", key: "de", label: "Debt / equity (ratio)", val: 0.5, step: "0.1",
+    tip: "How much debt the company carries vs shareholder money. Lower = safer. Under 0.5 is conservative; over 2 is risky." },
+  { id: "in-ma", key: "ma", label: "Price vs long-term avg %", val: 8, step: "any",
+    tip: "How far the price sits above (or below) its 200-day average. Positive = uptrend, negative = downtrend." },
+];
+
+function buildAnalyzerFields() {
+  $("an-fields").innerHTML = METRICS.map((m) => `
+    <div>
+      <label class="fld">${m.label}<span class="info" title="${esc(m.tip)}">i</span></label>
+      <div class="tiptext hidden">${esc(m.tip)}</div>
+      <input id="${m.id}" type="number" step="${m.step}" value="${m.val}" />
+    </div>`).join("");
+}
+
+$("an-load").addEventListener("click", async () => {
+  const sym = $("an-ticker").value.toUpperCase().trim();
+  const msg = $("an-load-msg");
+  if (!sym) { msg.innerHTML = '<span class="err">Type a ticker first.</span>'; return; }
+  msg.textContent = "Loading latest scan data…";
+  // most recent market_data row for this symbol
+  const { data, error } = await sb.from("market_data")
+    .select("price,rsi_14,ma_200,rel_strength_12m,revenue_growth,earnings_growth,gross_margin,fcf_yield,debt_to_equity,captured_at,assets!inner(symbol)")
+    .eq("assets.symbol", sym).order("captured_at", { ascending: false }).limit(1);
+  if (error) { msg.innerHTML = `<span class="err">${esc(error.message)}</span>`; return; }
+  if (!data || !data.length) { msg.innerHTML = `<span class="err">No scan data for ${esc(sym)} yet. Enter the numbers by hand, or scan it first.</span>`; return; }
+  const m = data[0];
+  $("an-price").value = m.price ?? "";
+  const setv = (id, v) => { if (v != null) $(id).value = v; };
+  setv("in-rev", (m.revenue_growth ?? 0) * 100);
+  setv("in-eps", (m.earnings_growth ?? 0) * 100);
+  setv("in-margin", (m.gross_margin ?? 0) * 100);
+  setv("in-fcf", (m.fcf_yield ?? 0) * 100);
+  setv("in-rel", (m.rel_strength_12m ?? 0) * 100);
+  setv("in-rsi", m.rsi_14 ?? 50);
+  setv("in-de", m.debt_to_equity ?? 0);
+  if (m.price && m.ma_200) setv("in-ma", ((m.price - m.ma_200) / m.ma_200) * 100);
+  msg.innerHTML = `<span class="ok">Loaded ${esc(sym)} from ${new Date(m.captured_at).toLocaleDateString()}.</span>`;
+});
+
+// ---- 7-framework scoring (verbatim port of engine/gates/gate3 + IIP_Command_Center.html) ----
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function verdictFor(s) { return s >= 7 ? "BUY" : s >= 5 ? "NEUTRAL" : "AVOID"; }
-
 function frameworks(d) {
   const out = [];
   let gs = 5; if (d.fcf > 5) gs += 2; else if (d.fcf > 2) gs += 1; else gs -= 1;
   if (d.de < 0.5) gs += 1; else if (d.de > 2) gs -= 2; if (d.eps > 10) gs += 1; else if (d.eps < 0) gs -= 2;
-  out.push(["Graham", "Deep value", clamp(gs, 1, 10)]);
+  out.push(["Graham", "Deep value", clamp(gs, 1, 10), "value"]);
   let bs = 5; if (d.margin > 50) bs += 2; else if (d.margin > 35) bs += 1; else if (d.margin < 20) bs -= 1;
   if (d.eps > 10 && d.eps < 50) bs += 1; if (d.de < 0.5) bs += 1; else if (d.de > 1.5) bs -= 1; if (d.fcf > 4) bs += 1; else if (d.fcf < 1) bs -= 1;
-  out.push(["Buffett", "Quality compounder", clamp(bs, 1, 10)]);
+  out.push(["Buffett", "Quality compounder", clamp(bs, 1, 10), "long"]);
   let ls = 5; if (d.eps >= 20 && d.eps <= 50) ls += 3; else if (d.eps > 50 && d.eps <= 100) ls += 2; else if (d.eps > 100) ls += 1; else if (d.eps > 10) ls += 1; else if (d.eps < 0) ls -= 2;
   if (d.rev > 10) ls += 1; else if (d.rev < 0) ls -= 1; if (d.rsi > 75) ls -= 1; else if (d.rsi < 35) ls += 1; if (d.rel > 30) ls += 1; else if (d.rel < -20) ls -= 1;
-  out.push(["Lynch", "Growth at reasonable price", clamp(ls, 1, 10)]);
+  out.push(["Lynch", "Growth at reasonable price", clamp(ls, 1, 10), "mid"]);
   let ms = 5; if (d.fcf > 6) ms += 2; else if (d.fcf > 3) ms += 1; else if (d.fcf < 1) ms -= 2;
   let roic = d.margin / (1 + d.de) / 100; if (roic > 0.30) ms += 2; else if (roic > 0.15) ms += 1; else if (roic < 0.05) ms -= 1; if (d.eps > 15) ms += 1;
-  out.push(["Magic Formula", "Earnings yield × ROIC", clamp(ms, 1, 10)]);
+  out.push(["Magic Formula", "Earnings yield × ROIC", clamp(ms, 1, 10), "mid"]);
   let mo = 5; if (d.rel > 50) mo += 3; else if (d.rel > 20) mo += 2; else if (d.rel > 0) mo += 1; else mo -= 2;
   if (d.ma > 10) mo += 1; else if (d.ma > 0) mo += 0.5; else mo -= 1; if (d.rsi > 80) mo -= 1; else if (d.rsi >= 45 && d.rsi <= 65) mo += 1;
-  out.push(["Momentum", "Trend persistence", clamp(mo, 1, 10)]);
+  out.push(["Momentum", "Trend persistence", clamp(mo, 1, 10), "short"]);
   let cs = 5; if (d.eps > 15 && d.rel < -10) cs += 3; else if (d.eps > 10 && d.rsi < 40) cs += 2; else if (d.rsi > 75 && d.rel > 50) cs -= 2; else if (d.rsi > 70 && d.eps < 10) cs -= 1;
-  out.push(["Marks", "Contrarian / 2nd level", clamp(cs, 1, 10)]);
+  out.push(["Marks", "Contrarian / 2nd level", clamp(cs, 1, 10), "mid"]);
   let ts = 5; if (d.de < 0.3) ts += 2; else if (d.de < 0.7) ts += 1; else if (d.de > 1.5) ts -= 2; else if (d.de > 2.5) ts -= 3;
   if (d.margin > 50) ts += 1; else if (d.margin < 20) ts -= 1; if (d.fcf > 4) ts += 1; else if (d.fcf < 1) ts -= 1; if (d.rel > 100) ts -= 1;
-  out.push(["Taleb", "Antifragility / risk", clamp(ts, 1, 10)]);
+  out.push(["Taleb", "Antifragility / risk", clamp(ts, 1, 10), "long"]);
   return out;
+}
+function convergence(fws) {
+  let buys = 0, avoids = 0, sum = 0; const n = fws.length;
+  fws.forEach((f) => { const v = verdictFor(f[2]); if (v === "BUY") buys++; if (v === "AVOID") avoids++; sum += f[2]; });
+  const avg = sum / n, ratio = (buys - avoids) / n;
+  let signal;
+  if (ratio >= 0.5) signal = "strong"; else if (ratio >= 0.3) signal = "lean";
+  else if (ratio <= -0.3) signal = "avoid"; else if (avoids >= 3) signal = "redflag"; else signal = "mixed";
+  return { avg, ratio, buys, avoids, neutrals: n - buys - avoids, signal };
+}
+
+// ---- plain-English synthesis ----
+const HORIZON_W = { short: 1, mid: 2, long: 3 };
+function tradeHorizon(fws) {
+  let wsum = 0, sw = 0;
+  fws.forEach((f) => { const w = f[2]; wsum += w * HORIZON_W[f[3]]; sw += w; });
+  const h = sw ? wsum / sw : 2;
+  if (h < 1.8) return { label: "Short-term (weeks to a few months)", stop: 0.06, target: 0.12 };
+  if (h < 2.4) return { label: "Mid-term (3–9 months)", stop: 0.08, target: 0.20 };
+  return { label: "Long-term (1+ years)", stop: 0.12, target: 0.40 };
+}
+function plainSignals(d) {
+  const pos = [], neg = [];
+  if (d.rel > 30) pos.push("it has been a market leader over the past year");
+  else if (d.rel < -20) neg.push("it has badly lagged the market this past year");
+  if (d.eps > 20) pos.push("profits are growing strongly");
+  else if (d.eps < 0) neg.push("profits are shrinking");
+  if (d.rev > 15) pos.push("sales are growing fast");
+  else if (d.rev < 0) neg.push("sales are declining");
+  if (d.margin > 50) pos.push("it has excellent profit margins");
+  else if (d.margin < 20) neg.push("its profit margins are thin");
+  if (d.fcf > 5) pos.push("it throws off strong free cash flow");
+  else if (d.fcf < 1) neg.push("it generates little spare cash");
+  if (d.de < 0.5) pos.push("it has a strong, low-debt balance sheet");
+  else if (d.de > 2) neg.push("it carries heavy debt");
+  if (d.rsi > 75) neg.push("it looks overbought right now (a pullback is possible)");
+  else if (d.rsi < 30) pos.push("it looks oversold (potentially a bargain entry)");
+  if (d.ma > 10) pos.push("it trades well above its long-term trend");
+  else if (d.ma < 0) neg.push("it trades below its long-term trend");
+  return { pos, neg };
+}
+function joinList(arr) {
+  if (!arr.length) return "";
+  if (arr.length === 1) return arr[0];
+  return arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
 }
 
 $("run-analyzer").addEventListener("click", () => {
   const g = (id) => parseFloat($(id).value) || 0;
   const d = { rev: g("in-rev"), eps: g("in-eps"), margin: g("in-margin"), fcf: g("in-fcf"),
               rel: g("in-rel"), rsi: g("in-rsi") || 50, de: g("in-de"), ma: g("in-ma") };
+  const price = parseFloat($("an-price").value) || 0;
+  const ticker = $("an-ticker").value.toUpperCase().trim();
   const fws = frameworks(d);
-  let buys = 0, avoids = 0, sum = 0;
+  const conv = convergence(fws);
+  const hz = tradeHorizon(fws);
+  const sig = conv.signal;
+
+  // headline verdict
+  let verdict, vcolor, lede;
+  if (sig === "strong") { verdict = "BUY"; vcolor = "var(--green)"; lede = "Strong agreement across the strategies."; }
+  else if (sig === "lean") { verdict = "BUY"; vcolor = "var(--teal)"; lede = "A lean buy — more in favour than against, but not unanimous."; }
+  else if (sig === "avoid") { verdict = "AVOID"; vcolor = "var(--red)"; lede = "The strategies disagree or lean negative."; }
+  else if (sig === "redflag") { verdict = "AVOID"; vcolor = "var(--red)"; lede = "Several red flags here."; }
+  else { verdict = "WAIT"; vcolor = "var(--yellow)"; lede = "Mixed signals — no clear edge yet."; }
+
+  const { pos, neg } = plainSignals(d);
+  const name = ticker || "This stock";
+
+  // trade plan (needs a price for dollar levels)
+  let plan = "";
+  if (price > 0) {
+    const lo = price * 0.97, hi = price * 1.01;
+    const stop = price * (1 - hz.stop), target = price * (1 + hz.target);
+    const rr = (target - price) / (price - stop);
+    plan = `
+      <div class="grid4" style="margin-top:6px;">
+        <div class="stat"><div class="k">Entry range</div><div class="v">${money(lo)}–${money(hi)}</div></div>
+        <div class="stat"><div class="k">Stop-loss</div><div class="v" style="color:var(--red)">${money(stop)} (−${Math.round(hz.stop*100)}%)</div></div>
+        <div class="stat"><div class="k">Target</div><div class="v" style="color:var(--green)">${money(target)} (+${Math.round(hz.target*100)}%)</div></div>
+        <div class="stat"><div class="k">Reward:risk</div><div class="v">${rr.toFixed(1)} : 1</div></div>
+      </div>`;
+  } else {
+    plan = `<div class="muted" style="margin-top:8px;">Enter a current price above to get exact entry / stop / target levels.</div>`;
+  }
+
+  // plain-English recommendation paragraph
+  let para;
+  if (verdict === "BUY") {
+    para = `${name} rates a <b>BUY</b>. ${conv.buys} of 7 strategies are positive (only ${conv.avoids} negative). `
+      + (pos.length ? `The case for it: ${joinList(pos)}. ` : "")
+      + (neg.length ? `Keep an eye on the downside: ${joinList(neg)}. ` : "")
+      + `If you take it, buy near the entry range, set the stop-loss to cap your loss, and aim for the target. This profiles as a <b>${hz.label.toLowerCase()}</b> trade.`;
+  } else if (verdict === "WAIT") {
+    para = `${name} is a <b>WAIT</b>. The strategies are split (${conv.buys} for, ${conv.avoids} against), so there's no clear edge. `
+      + (pos.length ? `On the plus side: ${joinList(pos)}. ` : "")
+      + (neg.length ? `Against it: ${joinList(neg)}. ` : "")
+      + `Better to watch it and revisit if the picture sharpens — for example a dip toward your entry range or a stronger earnings trend.`;
+  } else {
+    para = `${name} rates an <b>AVOID</b> for now. ${conv.avoids} of 7 strategies are negative. `
+      + (neg.length ? `The concerns: ${joinList(neg)}. ` : "")
+      + (pos.length ? `It's not all bad — ${joinList(pos)} — but that isn't enough to outweigh the risks today. ` : "")
+      + `Wait for the fundamentals or trend to improve before considering it.`;
+  }
+
   const rows = fws.map((f) => {
-    const v = verdictFor(f[2]); if (v === "BUY") buys++; if (v === "AVOID") avoids++; sum += f[2];
-    return `<div class="card"><div class="row between">
+    const v = verdictFor(f[2]);
+    return `<div class="card" style="padding:11px 14px; margin-bottom:8px;"><div class="row between">
       <div><div class="tk" style="font-size:16px;">${f[0]}</div><div class="nm">${f[1]}</div></div>
       <div class="row" style="gap:14px;">
         <span class="pill" style="background:rgba(255,255,255,.06); color:${VERDICT_COLOR[v]}">${v}</span>
-        <span class="big" style="color:${convColor(f[2])}">${f[2].toFixed(1)}</span>
-      </div></div></div>`;
+        <span class="big" style="color:${convColor(f[2])}">${f[2].toFixed(1)}</span></div></div></div>`;
   }).join("");
-  const avg = sum / fws.length, ratio = (buys - avoids) / fws.length;
-  let sig, col;
-  if (ratio >= 0.5) { sig = "STRONG CONVERGENCE — BUY"; col = "var(--green)"; }
-  else if (ratio >= 0.3) { sig = "MODERATE — LEAN BUY"; col = "var(--yellow)"; }
-  else if (ratio <= -0.3) { sig = "DIVERGENT — AVOID"; col = "var(--red)"; }
-  else if (avoids >= 3) { sig = "RED FLAGS"; col = "var(--red)"; }
-  else { sig = "MIXED — NO EDGE"; col = "var(--muted)"; }
 
-  $("an-verdict").textContent = sig; $("an-verdict").style.color = col;
-  $("an-avg").textContent = avg.toFixed(2);
-  $("an-list").innerHTML = rows;
+  $("analyzer-result").innerHTML = `
+    <div class="verdict-box" style="background:${vcolor === "var(--yellow)" ? "rgba(255,217,61,.08)" : vcolor === "var(--red)" ? "rgba(255,93,93,.08)" : "rgba(0,255,135,.08)"}; border-color:${vcolor};">
+      <div class="row between"><div class="xl" style="color:${vcolor}">${verdict}</div>
+        <div class="center"><div class="dim" style="font-size:12px;">AVG SCORE</div><div class="big">${conv.avg.toFixed(2)}/10</div></div></div>
+      <div class="muted" style="margin-top:4px;">${lede}</div>
+      ${plan}
+    </div>
+    <div class="card"><div class="plan-line">${para}</div></div>
+    <div class="dim" style="font-size:12px; margin:14px 2px 8px;">HOW EACH STRATEGY VOTED</div>
+    ${rows}`;
   $("analyzer-result").classList.remove("hidden");
 });
+
+// ====================================================================
+// TRADES (paper_trades)
+// ====================================================================
+async function loadTrades() {
+  const list = $("t-list");
+  const { data, error } = await sb.from("paper_trades")
+    .select("id,entry_price,stop_loss,target,conviction_at_entry,position_size_pct,entry_date,exit_price,outcome,assets(symbol)")
+    .order("entry_date", { ascending: false });
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  if (!data.length) { list.innerHTML = '<div class="card muted">No paper trades yet. Log your first above to start the track record.</div>'; return; }
+  list.innerHTML = data.map((t) => {
+    const a = t.assets || {};
+    const rr = (t.target && t.entry_price && t.stop_loss) ? ((t.target - t.entry_price) / (t.entry_price - t.stop_loss)).toFixed(1) : "—";
+    const oc = t.outcome || "open";
+    const ocColor = oc === "win" ? "var(--green)" : oc === "loss" ? "var(--red)" : "var(--yellow)";
+    return `<div class="card"><div class="row between">
+      <span class="tk">${esc(a.symbol)}</span>
+      <span class="pill" style="background:rgba(255,255,255,.06); color:${ocColor}">${oc.toUpperCase()}</span></div>
+      <div class="grid4" style="margin-top:10px;">
+        <div class="stat"><div class="k">Entry</div><div class="v">${money(t.entry_price)}</div></div>
+        <div class="stat"><div class="k">Stop</div><div class="v" style="color:var(--red)">${money(t.stop_loss)}</div></div>
+        <div class="stat"><div class="k">Target</div><div class="v" style="color:var(--green)">${money(t.target)}</div></div>
+        <div class="stat"><div class="k">R:R</div><div class="v">${rr}:1</div></div></div>
+      <div class="row between" style="margin-top:10px; font-size:13px;">
+        <span class="muted">conv ${num(t.conviction_at_entry, 1)} · size ${num(t.position_size_pct, 1)}% · ${t.entry_date || ""}</span>
+        <span>${oc === "open"
+          ? `<button class="btn secondary small" data-close="${t.id}" data-entry="${t.entry_price}">Close</button>`
+          : `exit ${money(t.exit_price)}`}
+          <button class="btn secondary small" data-del="${t.id}">Delete</button></span></div></div>`;
+  }).join("");
+  list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+    await sb.from("paper_trades").delete().eq("id", b.dataset.del); loadTrades();
+  }));
+  list.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", async () => {
+    const exit = parseFloat(prompt("Exit price?"));
+    if (!exit) return;
+    const entry = parseFloat(b.dataset.entry);
+    const outcome = exit >= entry ? "win" : "loss";
+    await sb.from("paper_trades").update({ exit_price: exit, exit_date: new Date().toISOString().slice(0, 10), outcome }).eq("id", b.dataset.close);
+    loadTrades();
+  }));
+}
+$("t-add").addEventListener("click", async () => {
+  const msg = $("t-msg");
+  const sym = $("t-ticker").value.toUpperCase().trim();
+  if (!sym) { msg.innerHTML = '<span class="err">Ticker required.</span>'; return; }
+  try {
+    msg.textContent = "Saving…";
+    const asset_id = await findOrCreateAsset(sym);
+    const { error } = await sb.from("paper_trades").insert({
+      asset_id, entry_price: parseFloat($("t-entry").value) || null, stop_loss: parseFloat($("t-stop").value) || null,
+      target: parseFloat($("t-target").value) || null, conviction_at_entry: parseFloat($("t-conv").value) || null,
+      position_size_pct: parseFloat($("t-size").value) || null, entry_date: new Date().toISOString().slice(0, 10), outcome: "open",
+    });
+    if (error) throw error;
+    ["t-ticker", "t-entry", "t-stop", "t-target", "t-conv", "t-size"].forEach((id) => ($(id).value = ""));
+    msg.innerHTML = '<span class="ok">Trade logged.</span>'; loadTrades();
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+});
+
+// ====================================================================
+// PORTFOLIO (positions)
+// ====================================================================
+async function loadPortfolio() {
+  const list = $("p-list"), summary = $("p-summary");
+  const { data, error } = await sb.from("positions")
+    .select("id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,assets(symbol,name)")
+    .eq("is_open", true).order("entry_date", { ascending: false });
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; summary.innerHTML = ""; return; }
+  if (!data.length) { summary.innerHTML = ""; list.innerHTML = '<div class="card muted">No holdings yet. Add one below.</div>'; return; }
+  const valued = data.map((p) => ({ ...p, value: (Number(p.quantity) || 0) * (Number(p.entry_price) || 0) }));
+  const total = valued.reduce((s, p) => s + p.value, 0);
+  summary.innerHTML = `<div class="card"><div class="row between">
+      <div><div class="dim" style="font-size:12px;">PORTFOLIO VALUE (at entry)</div><div class="xl">${money(total)}</div></div>
+      <div class="center"><div class="dim" style="font-size:12px;">HOLDINGS</div><div class="big">${valued.length}</div></div></div></div>`;
+  list.innerHTML = valued.map((p) => {
+    const a = p.assets || {}, alloc = total ? (p.value / total) * 100 : 0;
+    return `<div class="card"><div class="row between">
+      <div><span class="tk">${esc(a.symbol)}</span> <span class="nm">${esc(a.name)}</span></div>
+      <span class="pill" style="background:rgba(255,255,255,.06); color:var(--teal)">${esc((p.account_type || "").toUpperCase())}</span></div>
+      <div class="grid4" style="margin-top:10px;">
+        <div class="stat"><div class="k">Qty</div><div class="v">${num(p.quantity, 2)}</div></div>
+        <div class="stat"><div class="k">Entry</div><div class="v">${money(p.entry_price)}</div></div>
+        <div class="stat"><div class="k">Value</div><div class="v">${money(p.value)}</div></div>
+        <div class="stat"><div class="k">Allocation</div><div class="v">${alloc.toFixed(1)}%</div></div></div>
+      <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${alloc}%; background:var(--teal)"></div></div>
+      <div class="row between" style="margin-top:8px; font-size:13px;">
+        <span class="muted">cost basis ${money(p.cost_basis)} · ${p.entry_date || ""}</span>
+        <button class="btn secondary small" data-del="${p.id}">Remove</button></div></div>`;
+  }).join("");
+  list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+    await sb.from("positions").update({ is_open: false }).eq("id", b.dataset.del); loadPortfolio();
+  }));
+}
+$("p-add").addEventListener("click", async () => {
+  const msg = $("p-msg");
+  const sym = $("p-ticker").value.toUpperCase().trim();
+  if (!sym) { msg.innerHTML = '<span class="err">Ticker required.</span>'; return; }
+  try {
+    msg.textContent = "Saving…";
+    const asset_id = await findOrCreateAsset(sym);
+    const { error } = await sb.from("positions").insert({
+      asset_id, quantity: parseFloat($("p-qty").value) || null, entry_price: parseFloat($("p-entry").value) || null,
+      cost_basis: parseFloat($("p-cost").value) || null, account_type: $("p-acct").value,
+      entry_date: $("p-date").value || null, is_open: true,
+    });
+    if (error) throw error;
+    ["p-ticker", "p-qty", "p-entry", "p-cost", "p-date"].forEach((id) => ($(id).value = ""));
+    msg.innerHTML = '<span class="ok">Holding added.</span>'; loadPortfolio();
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+});
+
+// ====================================================================
+// SCORECARD (framework_scores aggregated)
+// ====================================================================
+async function loadScorecard() {
+  const list = $("sc-list");
+  const { data, error } = await sb.from("framework_scores").select("framework_name,verdict,score").limit(5000);
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  if (!data.length) { list.innerHTML = '<div class="card muted">No framework history yet — run scans to build the scorecard.</div>'; return; }
+  const agg = {};
+  data.forEach((r) => {
+    const f = agg[r.framework_name] || (agg[r.framework_name] = { buy: 0, neutral: 0, avoid: 0, sum: 0, n: 0 });
+    if (r.verdict === "BUY") f.buy++; else if (r.verdict === "AVOID") f.avoid++; else f.neutral++;
+    f.sum += Number(r.score) || 0; f.n++;
+  });
+  list.innerHTML = Object.entries(agg).sort((a, b) => (b[1].sum / b[1].n) - (a[1].sum / a[1].n)).map(([name, f]) => {
+    const avg = f.sum / f.n, total = f.n;
+    const w = (x) => (total ? (x / total) * 100 : 0);
+    return `<div class="card"><div class="row between">
+      <div class="tk" style="font-size:17px;">${esc(name)}</div>
+      <div class="big" style="color:${convColor(avg)}">${avg.toFixed(2)}<span class="dim" style="font-size:13px;">/10 avg</span></div></div>
+      <div class="bar" style="margin-top:10px; display:flex;">
+        <div style="width:${w(f.buy)}%; background:var(--green); height:100%;"></div>
+        <div style="width:${w(f.neutral)}%; background:var(--yellow); height:100%;"></div>
+        <div style="width:${w(f.avoid)}%; background:var(--red); height:100%;"></div></div>
+      <div class="row between" style="margin-top:8px; font-size:13px;">
+        <span style="color:var(--green)">${f.buy} buy</span>
+        <span style="color:var(--yellow)">${f.neutral} neutral</span>
+        <span style="color:var(--red)">${f.avoid} avoid</span>
+        <span class="muted">${total} calls</span></div></div>`;
+  }).join("");
+}
+
+// ====================================================================
+// SETTINGS
+// ====================================================================
+const FREQ = ["manual", "minute", "hourly", "daily", "weekly", "monthly", "off"];
+const SLICES = ["full", "top100", "top50", "top25", "movers", "watchlist", "sector", "custom"];
+let SETTINGS_CACHE = {};
+
+async function loadSettings() {
+  const body = $("set-body");
+  const { data, error } = await sb.from("settings").select("key,value");
+  if (error) { body.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  SETTINGS_CACHE = {}; data.forEach((r) => (SETTINGS_CACHE[r.key] = r.value));
+  const g = (k, d) => (SETTINGS_CACHE[k] !== undefined ? SETTINGS_CACHE[k] : d);
+  const freqs = g("scan_frequencies", {});
+  const channels = g("alert_channels", {});
+
+  const freqSel = (src) => `<div><label class="fld">${src[0].toUpperCase() + src.slice(1)}</label>
+    <select data-freq="${src}">${FREQ.map((f) => `<option ${freqs[src] === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
+
+  body.innerHTML = `
+    <div class="card">
+      <div class="big" style="margin-bottom:6px;">Scan frequency</div>
+      <div class="muted" style="margin-bottom:8px;">How often each free data source is scanned.</div>
+      <div class="grid3">${["price", "trends", "reddit", "bitcoin", "grok_x"].map(freqSel).join("")}</div>
+    </div>
+    <div class="card">
+      <div class="big" style="margin-bottom:6px;">Universe</div>
+      <label class="fld">Default slice to scan</label>
+      <select id="set-slice">${SLICES.map((s) => `<option ${g("default_universe_slice") === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+    </div>
+    <div class="card" style="border-color:var(--yellow);">
+      <div class="big" style="margin-bottom:6px;">Claude API (metered) <span class="info" title="The qualitative deep-analysis step. Costs money per run. Keep OFF unless you intend to spend.">i</span></div>
+      <div class="tiptext hidden">The qualitative deep-analysis step. Costs money per run. Keep OFF unless you intend to spend.</div>
+      <label class="fld">Enabled</label>
+      <select id="set-claude"><option value="false" ${!g("claude_api_enabled") ? "selected" : ""}>OFF (default — no spend)</option>
+        <option value="true" ${g("claude_api_enabled") ? "selected" : ""}>ON (will incur cost)</option></select>
+      <div class="grid2" style="margin-top:6px;">
+        <div><label class="fld">Monthly budget cap $</label><input id="set-cap" type="number" step="0.01" value="${g("monthly_budget_cap", 25)}" /></div>
+        <div><label class="fld">Alert at % of budget</label><input id="set-alertpct" type="number" value="${g("budget_alert_threshold_pct", 75)}" /></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="big" style="margin-bottom:6px;">Alerts</div>
+      <div class="grid2">
+        <div><label class="fld">Email alerts</label><select id="set-email"><option value="false" ${!channels.email_enabled ? "selected" : ""}>Off</option><option value="true" ${channels.email_enabled ? "selected" : ""}>On</option></select></div>
+        <div><label class="fld">SMS alerts</label><select id="set-sms"><option value="false" ${!channels.sms_enabled ? "selected" : ""}>Off</option><option value="true" ${channels.sms_enabled ? "selected" : ""}>On</option></select></div>
+      </div>
+    </div>
+    <button id="set-save" class="btn" style="width:100%;">Save settings</button>
+    <div id="set-msg" class="center" style="font-size:14px; margin:10px 0;"></div>
+    <div class="card" style="margin-top:12px;">
+      <div class="big" style="margin-bottom:6px;">Run a scan</div>
+      <div class="muted">Scans are run by the engine (locally or on Railway), not from this page. On-demand "Run now" wiring comes with the scheduler step. Settings you save here are read by the engine on its next run.</div>
+    </div>`;
+
+  $("set-save").addEventListener("click", saveSettings);
+}
+async function saveSettings() {
+  const msg = $("set-msg");
+  try {
+    msg.textContent = "Saving…";
+    const freqs = {};
+    document.querySelectorAll("[data-freq]").forEach((s) => (freqs[s.dataset.freq] = s.value));
+    const channels = Object.assign({}, SETTINGS_CACHE.alert_channels || {}, {
+      email_enabled: $("set-email").value === "true", sms_enabled: $("set-sms").value === "true",
+    });
+    const rows = [
+      { key: "scan_frequencies", value: freqs },
+      { key: "default_universe_slice", value: $("set-slice").value },
+      { key: "claude_api_enabled", value: $("set-claude").value === "true" },
+      { key: "monthly_budget_cap", value: parseFloat($("set-cap").value) || 0 },
+      { key: "budget_alert_threshold_pct", value: parseFloat($("set-alertpct").value) || 0 },
+      { key: "alert_channels", value: channels },
+    ];
+    const { error } = await sb.from("settings").upsert(rows, { onConflict: "key" });
+    if (error) throw error;
+    msg.innerHTML = '<span class="ok">Saved.</span>';
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
 
 init();
