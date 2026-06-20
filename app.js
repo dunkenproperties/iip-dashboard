@@ -22,6 +22,9 @@ async function init() {
   showAuth(session);
   sb.auth.onAuthStateChange((_e, s) => showAuth(s));
   buildAnalyzerFields();
+  $("tax-year").addEventListener("change", renderTax);
+  $("tax-csv").addEventListener("click", taxCSV);
+  $("tax-print").addEventListener("click", () => window.print());
 }
 function showAuth(session) {
   const authed = !!session;
@@ -42,16 +45,15 @@ $("send-link").addEventListener("click", async () => {
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
 // ---------- tabs ----------
-const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "scorecard", "settings"];
-document.querySelectorAll(".tab").forEach((t) => {
-  t.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-    t.classList.add("active");
-    TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== t.dataset.tab));
-    const map = { trades: loadTrades, portfolio: loadPortfolio, scorecard: loadScorecard, settings: loadSettings };
-    if (map[t.dataset.tab]) map[t.dataset.tab]();
-  });
-});
+const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "tax", "scorecard", "settings"];
+function activateTab(name) {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
+  TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
+  const map = { trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, settings: loadSettings };
+  if (map[name]) map[name]();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => activateTab(t.dataset.tab)));
 $("refresh").addEventListener("click", loadAll);
 
 // ---------- shared data ----------
@@ -89,17 +91,34 @@ async function loadCandidates(scan) {
   if (!data.length) { list.innerHTML = '<div class="card muted">No recommendations in the latest scan.</div>'; return; }
   list.innerHTML = data.map((r, i) => {
     const a = r.assets || {}, c = Number(r.conviction);
-    return `<div class="card"><div class="row between">
-      <div class="row" style="gap:12px;"><span class="dim" style="width:18px;">${i + 1}</span>
-        <div><span class="tk">${esc(a.symbol)}</span><div class="nm">${esc(a.name)}${a.sector ? " · " + esc(a.sector) : ""}</div></div></div>
-      <div class="center"><div class="big" style="color:${convColor(c)}">${c.toFixed(2)}</div>
-        <span class="pill" style="background:rgba(255,255,255,.06); color:${ACTION_COLOR[r.action] || "var(--muted)"}">${esc((r.action || "").toUpperCase())}</span></div></div>
-      <div class="grid4" style="margin-top:12px;">
-        <div class="stat"><div class="k">Entry</div><div class="v">${money(r.entry_target)}</div></div>
-        <div class="stat"><div class="k">Stop</div><div class="v" style="color:var(--red)">${money(r.stop_loss)}</div></div>
-        <div class="stat"><div class="k">Target</div><div class="v" style="color:var(--green)">${money(r.exit_target)}</div></div>
-        <div class="stat"><div class="k">Size</div><div class="v">${num(r.position_size_pct, 2)}%</div></div></div>
-      ${r.rationale ? `<div class="muted" style="margin-top:10px; font-size:14px;">${esc(r.rationale)}</div>` : ""}</div>`;
+    const band = c >= 7 ? "Strong" : c >= 5.5 ? "Moderate" : "Weak";
+    const oneLiner = {
+      buy: "Strong buy — most of the 7 strategies agree. Consider entering near the suggested price.",
+      watch: "Lean buy — promising but not unanimous. Consider a smaller position or waiting for a dip.",
+      wait: "Mixed — no clear edge yet. Worth watching rather than buying now.",
+      avoid: "Avoid — the strategies lean negative. Better to pass for now.",
+    }[r.action] || "";
+    const entry = Number(r.entry_target) || 0;
+    const stopPct = entry && r.stop_loss ? Math.round((1 - r.stop_loss / entry) * 100) : 8;
+    const t1 = entry * 1.12, t2 = entry * 1.20, t3 = entry * 1.40;
+    return `<div class="card">
+      <div class="row between">
+        <div class="row" style="gap:12px;"><span class="dim" style="width:18px;">${i + 1}</span>
+          <div><span class="tk">${esc(a.symbol)}</span><div class="nm">${esc(a.name)}${a.sector ? " · " + esc(a.sector) : ""}</div></div></div>
+        <div class="center"><div class="big" style="color:${convColor(c)}">${c.toFixed(1)}<span class="dim" style="font-size:14px;"> / 10</span></div>
+          <span class="pill" style="background:rgba(255,255,255,.06); color:${ACTION_COLOR[r.action] || "var(--muted)"}">${esc((r.action || "").toUpperCase())}</span></div></div>
+      <div class="fieldtip" style="margin-top:6px;"><b style="color:${convColor(c)}">${band} conviction</b> (${c.toFixed(1)}/10 — how strongly the 7 strategies agree; 7+ is strong). ${oneLiner}</div>
+      <div class="grid3" style="margin-top:12px;">
+        <div class="stat"><div class="k">Suggested buy</div><div class="v">${money(r.entry_target)}</div></div>
+        <div class="stat"><div class="k">Stop-loss</div><div class="v" style="color:var(--red)">${money(r.stop_loss)}</div></div>
+        <div class="stat"><div class="k">Suggested size</div><div class="v">${num(r.position_size_pct, 1)}%</div></div></div>
+      <div class="fieldtip">Buy ≈ the price at scan time — aim to enter near here. Stop-loss = sell if it falls to this (−${stopPct}%) to cap your loss. Size = suggested share of your <b>total portfolio</b>.</div>
+      <div class="fieldtip" style="margin-top:10px;">Profit targets (rule-of-thumb, from the buy price):</div>
+      <div class="grid3" style="margin-top:4px;">
+        <div class="stat"><div class="k">Short-term</div><div class="v" style="color:var(--green)">${money(t1)} <span class="dim" style="font-size:12px;">+12%</span></div></div>
+        <div class="stat"><div class="k">Mid-term</div><div class="v" style="color:var(--green)">${money(t2)} <span class="dim" style="font-size:12px;">+20%</span></div></div>
+        <div class="stat"><div class="k">Long-term</div><div class="v" style="color:var(--green)">${money(t3)} <span class="dim" style="font-size:12px;">+40%</span></div></div></div>
+    </div>`;
   }).join("");
 }
 
@@ -109,28 +128,42 @@ async function loadBitcoin(scan) {
   if (scan) { const { data } = await sb.from("bitcoin_snapshots").select("*").eq("scan_id", scan.id).limit(1); snap = data && data[0]; }
   if (!snap) { const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1); snap = data && data[0]; }
   if (!snap) { box.innerHTML = '<div class="card muted">No Bitcoin snapshot yet.</div>'; return; }
+  const BTC_COMP = {
+    trend: "Is the price above its key moving averages? Above = uptrend (bullish), below = downtrend.",
+    cycle: "Where Bitcoin sits in its ~4-year halving cycle. Mid-cycle is historically bullish; late-cycle = caution.",
+    sentiment: "The crowd's mood (Fear & Greed). Extreme fear can be a contrarian buying chance; extreme greed = caution.",
+    rsi: "Momentum, 0–100. Under 30 = oversold (possible bounce); over 70 = overbought (possible pullback).",
+    seasonality: "How Bitcoin has tended to perform in this calendar month, historically.",
+  };
+  const fng = Number(snap.fear_greed);
+  const fngText = isNaN(fng) ? "" : fng <= 25 ? "Extreme fear — historically a contrarian buy zone"
+    : fng <= 45 ? "Fear" : fng <= 55 ? "Neutral" : fng <= 75 ? "Greed" : "Extreme greed — caution";
+  const cs = Number(snap.composite_score);
   const comp = (snap.raw && snap.raw.components) || {};
   const compRows = Object.entries(comp).map(([k, v]) => {
     const s = Number(v.score || 0);
-    return `<div style="margin-bottom:10px;"><div class="row between" style="font-size:14px;">
-      <span style="text-transform:capitalize;">${esc(k)}</span><span class="muted">${num(s, 1)} · ${esc(v.note)}</span></div>
-      <div class="bar"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div></div>`;
+    return `<div style="margin-bottom:12px;"><div class="row between" style="font-size:14px;">
+      <span style="text-transform:capitalize; font-weight:600;">${esc(k)}</span><span class="muted">${num(s, 1)}/10 · ${esc(v.note)}</span></div>
+      <div class="bar"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div>
+      <div class="fieldtip">${esc(BTC_COMP[k] || "")}</div></div>`;
   }).join("");
   box.innerHTML = `
     <div class="card"><div class="row between">
-      <div><div class="dim" style="font-size:12px;">BITCOIN</div><div class="big">${money(snap.price)}</div></div>
+      <div><div class="dim" style="font-size:12px;">BITCOIN PRICE</div><div class="big">${money(snap.price)}</div></div>
       <div class="center"><div class="dim" style="font-size:12px;">VERDICT</div>
-        <div class="big" style="color:${convColor(Number(snap.composite_score))}">${esc(snap.verdict)}</div></div></div>
-      <div class="muted" style="margin-top:8px;">${esc(snap.position_guidance)}</div></div>
+        <div class="big" style="color:${convColor(cs)}">${esc(snap.verdict)}</div></div></div>
+      <div class="fieldtip" style="margin-top:8px;"><b>${esc(snap.position_guidance)}</b></div>
+      <div class="fieldtip">Overall score <b style="color:${convColor(cs)}">${num(cs, 1)}/10</b> — higher = more favourable. The verdict turns trend, cycle, sentiment, RSI and seasonality into one action.</div></div>
     <div class="card"><div class="grid4">
-      <div class="stat"><div class="k">Composite</div><div class="v" style="color:${convColor(Number(snap.composite_score))}">${num(snap.composite_score, 1)}/10</div></div>
       <div class="stat"><div class="k">RSI 14</div><div class="v">${num(snap.rsi_14, 0)}</div></div>
-      <div class="stat"><div class="k">vs ATH</div><div class="v">${pct(snap.ath_change_pct)}</div></div>
-      <div class="stat"><div class="k">Fear/Greed</div><div class="v">${num(snap.fear_greed, 0)}</div></div>
-      <div class="stat"><div class="k">50d MA</div><div class="v">${money(snap.ma_50)}</div></div>
-      <div class="stat"><div class="k">200d MA</div><div class="v">${money(snap.ma_200)}</div></div></div>
-      <div class="muted" style="margin-top:12px; font-size:14px;">${esc(snap.cycle_phase)}</div></div>
-    ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:10px;">SIGNAL BREAKDOWN</div>${compRows}</div>` : ""}`;
+      <div class="stat"><div class="k">Fear / Greed</div><div class="v">${num(snap.fear_greed, 0)} / 100</div></div>
+      <div class="stat"><div class="k">vs all-time high</div><div class="v">${pct(snap.ath_change_pct)}</div></div>
+      <div class="stat"><div class="k">50d / 200d avg</div><div class="v" style="font-size:14px;">${money(snap.ma_50)} / ${money(snap.ma_200)}</div></div></div>
+      <div class="fieldtip" style="margin-top:10px;"><b>Fear &amp; Greed ${num(snap.fear_greed, 0)}/100 — ${fngText}.</b> The index runs 0 (extreme fear) to 100 (extreme greed). Low readings often mark bargains, high readings mark froth.</div>
+      <div class="fieldtip"><b>RSI</b> 0–100 momentum (under 30 oversold, over 70 overbought). <b>vs all-time high</b>: how far below the peak — a big discount can mean opportunity or weakness. <b>50d/200d average</b>: price above these = uptrend.</div>
+      <div class="fieldtip" style="margin-top:8px;">${esc(snap.cycle_phase)}</div></div>
+    ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:4px;">SIGNAL BREAKDOWN</div>
+      <div class="fieldtip" style="margin-bottom:12px;">Each driver scored 0–10 (higher = more bullish for Bitcoin):</div>${compRows}</div>` : ""}`;
 }
 
 // ====================================================================
@@ -342,6 +375,22 @@ $("run-analyzer").addEventListener("click", () => {
   $("analyzer-result").classList.remove("hidden");
 });
 
+// ---- cross-tab prefill (so the ticker/price isn't re-entered) ----
+function prefillPortfolio({ ticker, entry }) {
+  $("p-ticker").value = ticker || "";
+  if (entry != null) $("p-entry").value = entry;
+  activateTab("portfolio");
+  $("p-msg").innerHTML = '<span class="ok">Prefilled from your paper trade — add quantity &amp; account, then save.</span>';
+}
+function prefillTrade({ ticker, entry, stop, target }) {
+  $("t-ticker").value = ticker || "";
+  if (entry != null) $("t-entry").value = entry;
+  if (stop != null) $("t-stop").value = stop;
+  if (target != null) $("t-target").value = target;
+  activateTab("trades");
+  $("t-msg").innerHTML = '<span class="ok">Prefilled from your holding — adjust and save as a paper trade.</span>';
+}
+
 // ====================================================================
 // TRADES (paper_trades)
 // ====================================================================
@@ -365,12 +414,11 @@ async function loadTrades() {
         <div class="stat"><div class="k">Stop</div><div class="v" style="color:var(--red)">${money(t.stop_loss)}</div></div>
         <div class="stat"><div class="k">Target</div><div class="v" style="color:var(--green)">${money(t.target)}</div></div>
         <div class="stat"><div class="k">R:R</div><div class="v">${rr}:1</div></div></div>
-      <div class="row between" style="margin-top:10px; font-size:13px;">
-        <span class="muted">conv ${num(t.conviction_at_entry, 1)} · size ${num(t.position_size_pct, 1)}% · ${t.entry_date || ""}</span>
-        <span>${oc === "open"
-          ? `<button class="btn secondary small" data-close="${t.id}" data-entry="${t.entry_price}">Close</button>`
-          : `exit ${money(t.exit_price)}`}
-          <button class="btn secondary small" data-del="${t.id}">Delete</button></span></div></div>`;
+      <div class="muted" style="margin-top:10px; font-size:13px;">conv ${num(t.conviction_at_entry, 1)} · size ${num(t.position_size_pct, 1)}% · ${t.entry_date || ""}${oc !== "open" ? " · exit " + money(t.exit_price) : ""}</div>
+      <div class="row wraprow" style="gap:6px; margin-top:8px;">
+        ${oc === "open" ? `<button class="btn secondary small" data-close="${t.id}" data-entry="${t.entry_price}">Close (win/loss)</button>` : ""}
+        <button class="btn secondary small" data-topf-sym="${esc(a.symbol)}" data-topf-entry="${t.entry_price ?? ""}">Add to Portfolio</button>
+        <button class="btn secondary small" data-del="${t.id}">Delete</button></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
     await sb.from("paper_trades").delete().eq("id", b.dataset.del); loadTrades();
@@ -383,6 +431,8 @@ async function loadTrades() {
     await sb.from("paper_trades").update({ exit_price: exit, exit_date: new Date().toISOString().slice(0, 10), outcome }).eq("id", b.dataset.close);
     loadTrades();
   }));
+  list.querySelectorAll("[data-topf-sym]").forEach((b) => b.addEventListener("click", () =>
+    prefillPortfolio({ ticker: b.dataset.topfSym, entry: b.dataset.topfEntry || null })));
 }
 $("t-add").addEventListener("click", async () => {
   const msg = $("t-msg");
@@ -408,7 +458,7 @@ $("t-add").addEventListener("click", async () => {
 async function loadPortfolio() {
   const list = $("p-list"), summary = $("p-summary");
   const { data, error } = await sb.from("positions")
-    .select("id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,assets(symbol,name)")
+    .select("id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,stop_loss,target,assets(symbol,name)")
     .eq("is_open", true).order("entry_date", { ascending: false });
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; summary.innerHTML = ""; return; }
   if (!data.length) { summary.innerHTML = ""; list.innerHTML = '<div class="card muted">No holdings yet. Add one below.</div>'; return; }
@@ -428,13 +478,29 @@ async function loadPortfolio() {
         <div class="stat"><div class="k">Value</div><div class="v">${money(p.value)}</div></div>
         <div class="stat"><div class="k">Allocation</div><div class="v">${alloc.toFixed(1)}%</div></div></div>
       <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${alloc}%; background:var(--teal)"></div></div>
-      <div class="row between" style="margin-top:8px; font-size:13px;">
-        <span class="muted">cost basis ${money(p.cost_basis)} · ${p.entry_date || ""}</span>
-        <button class="btn secondary small" data-del="${p.id}">Remove</button></div></div>`;
+      <div class="muted" style="margin-top:8px; font-size:13px;">cost basis ${money(p.cost_basis)} · bought ${p.entry_date || "—"}</div>
+      <div class="row wraprow" style="gap:6px; margin-top:8px;">
+        <button class="btn secondary small" data-sell="${p.id}" data-qty="${p.quantity ?? ""}" data-entry="${p.entry_price ?? ""}" data-cost="${p.cost_basis ?? ""}">Sell</button>
+        <button class="btn secondary small" data-topt-sym="${esc(a.symbol)}" data-topt-entry="${p.entry_price ?? ""}" data-topt-stop="${p.stop_loss ?? ""}" data-topt-target="${p.target ?? ""}">Add as Paper Trade</button>
+        <button class="btn secondary small" data-del="${p.id}">Delete</button></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-    await sb.from("positions").update({ is_open: false }).eq("id", b.dataset.del); loadPortfolio();
+    if (!confirm("Delete this holding entirely? (Use Sell instead to keep it for tax records.)")) return;
+    await sb.from("positions").delete().eq("id", b.dataset.del); loadPortfolio();
   }));
+  list.querySelectorAll("[data-sell]").forEach((b) => b.addEventListener("click", async () => {
+    const exit = parseFloat(prompt("Sell price per share?"));
+    if (!exit) return;
+    const qty = parseFloat(b.dataset.qty) || 0;
+    const cost = parseFloat(b.dataset.cost) || (parseFloat(b.dataset.entry) || 0) * qty;
+    const realized = exit * qty - cost;
+    await sb.from("positions").update({
+      is_open: false, exit_price: exit, exit_date: new Date().toISOString().slice(0, 10), realized_pnl: realized,
+    }).eq("id", b.dataset.sell);
+    loadPortfolio();
+  }));
+  list.querySelectorAll("[data-topt-sym]").forEach((b) => b.addEventListener("click", () =>
+    prefillTrade({ ticker: b.dataset.toptSym, entry: b.dataset.toptEntry || null, stop: b.dataset.toptStop || null, target: b.dataset.toptTarget || null })));
 }
 $("p-add").addEventListener("click", async () => {
   const msg = $("p-msg");
@@ -462,6 +528,15 @@ async function loadScorecard() {
   const { data, error } = await sb.from("framework_scores").select("framework_name,verdict,score").limit(5000);
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
   if (!data.length) { list.innerHTML = '<div class="card muted">No framework history yet — run scans to build the scorecard.</div>'; return; }
+  const DESC = {
+    "Graham": "Deep value — hunts for cheap, low-debt companies trading below what they're worth (Benjamin Graham).",
+    "Buffett": "Quality compounder — durable, high-margin businesses worth holding for years (Warren Buffett).",
+    "Lynch": "Growth at a reasonable price — fast growers not yet overpriced (Peter Lynch).",
+    "Magic Formula": "Cheap price + high return on capital combined into one ranking (Joel Greenblatt).",
+    "Momentum": "Trend-following — stocks going up tend to keep going up (Cliff Asness).",
+    "Marks": "Contrarian / second-level thinking — value where the crowd is fearful (Howard Marks).",
+    "Taleb": "Antifragility & risk — favours low debt and survival through shocks (Nassim Taleb).",
+  };
   const agg = {};
   data.forEach((r) => {
     const f = agg[r.framework_name] || (agg[r.framework_name] = { buy: 0, neutral: 0, avoid: 0, sum: 0, n: 0 });
@@ -473,7 +548,8 @@ async function loadScorecard() {
     const w = (x) => (total ? (x / total) * 100 : 0);
     return `<div class="card"><div class="row between">
       <div class="tk" style="font-size:17px;">${esc(name)}</div>
-      <div class="big" style="color:${convColor(avg)}">${avg.toFixed(2)}<span class="dim" style="font-size:13px;">/10 avg</span></div></div>
+      <div class="big" style="color:${convColor(avg)}">${avg.toFixed(1)}<span class="dim" style="font-size:13px;"> / 10 avg</span></div></div>
+      <div class="fieldtip" style="margin-top:2px;">${esc(DESC[name] || "")}</div>
       <div class="bar" style="margin-top:10px; display:flex;">
         <div style="width:${w(f.buy)}%; background:var(--green); height:100%;"></div>
         <div style="width:${w(f.neutral)}%; background:var(--yellow); height:100%;"></div>
@@ -482,8 +558,103 @@ async function loadScorecard() {
         <span style="color:var(--green)">${f.buy} buy</span>
         <span style="color:var(--yellow)">${f.neutral} neutral</span>
         <span style="color:var(--red)">${f.avoid} avoid</span>
-        <span class="muted">${total} calls</span></div></div>`;
+        <span class="muted">${total} calls</span></div>
+      <div class="fieldtip" style="margin-top:6px;">Average score ${avg.toFixed(1)}/10 across ${total} calls (higher = this strategy has been more positive overall). The bar shows its split of buy / neutral / avoid.</div></div>`;
   }).join("");
+}
+
+// ====================================================================
+// TAX — Canadian capital-gains report (from sold positions)
+// ====================================================================
+let TAX_ROWS = [];
+const ACCT_LABEL = { non_registered: "Non-registered", tfsa: "TFSA", rrsp: "RRSP", paper: "Paper" };
+
+async function loadTax() {
+  const body = $("tax-body");
+  const { data, error } = await sb.from("positions")
+    .select("entry_date,entry_price,quantity,cost_basis,account_type,exit_date,exit_price,realized_pnl,assets(symbol)")
+    .eq("is_open", false).not("exit_date", "is", null).order("exit_date", { ascending: false });
+  if (error) { body.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  TAX_ROWS = (data || []).map((p) => {
+    const qty = Number(p.quantity) || 0, buy = Number(p.entry_price) || 0, sell = Number(p.exit_price) || 0;
+    const cost = p.cost_basis != null ? Number(p.cost_basis) : buy * qty;
+    return {
+      symbol: (p.assets || {}).symbol, account: p.account_type, buyDate: p.entry_date, buyPrice: buy,
+      qty, cost, sellDate: p.exit_date, sellPrice: sell, proceeds: sell * qty,
+      gain: p.realized_pnl != null ? Number(p.realized_pnl) : sell * qty - cost,
+      year: (p.exit_date || "").slice(0, 4),
+    };
+  });
+  const years = [...new Set(TAX_ROWS.map((r) => r.year).filter(Boolean))].sort().reverse();
+  const sel = $("tax-year"); const cur = sel.value;
+  sel.innerHTML = `<option value="all">All years</option>` + years.map((y) => `<option>${y}</option>`).join("");
+  if (cur) sel.value = cur;
+  renderTax();
+}
+
+function taxTable(rows) {
+  const r2 = (v) => "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const gl = (v) => `<span style="color:${v >= 0 ? "var(--green)" : "var(--red)"}">${v >= 0 ? "" : "−"}${r2(Math.abs(v))}</span>`;
+  const head = `<tr><th class="l">Ticker</th><th>Buy date</th><th>Buy $</th><th>Qty</th><th>Cost basis</th>
+    <th>Sell date</th><th>Sell $</th><th>Proceeds</th><th>Gain / loss</th></tr>`;
+  const body = rows.map((r) => `<tr>
+    <td class="l">${esc(r.symbol)}</td><td>${r.buyDate || "—"}</td><td>${r2(r.buyPrice)}</td><td>${num(r.qty, 2)}</td>
+    <td>${r2(r.cost)}</td><td>${r.sellDate || "—"}</td><td>${r2(r.sellPrice)}</td><td>${r2(r.proceeds)}</td><td>${gl(r.gain)}</td></tr>`).join("");
+  const total = rows.reduce((s, r) => s + r.gain, 0);
+  const foot = `<tr><th class="l" colspan="8">Net gain / loss</th><th>${gl(total)}</th></tr>`;
+  return { html: `<div class="scrollx"><table class="tax">${head}${body}${foot}</table></div>`, total };
+}
+
+function renderTax() {
+  const body = $("tax-body"); const yr = ($("tax-year").value) || "all";
+  const rows = TAX_ROWS.filter((r) => yr === "all" || r.year === yr);
+  if (!rows.length) { body.innerHTML = '<div class="card muted">No sold holdings yet. In Portfolio, use <b>Sell</b> on a holding to record an exit — it appears here for tax reporting.</div>'; return; }
+  const taxable = rows.filter((r) => r.account === "non_registered");
+  const sheltered = rows.filter((r) => r.account === "tfsa" || r.account === "rrsp");
+
+  let html = "";
+  // Taxable (non-registered)
+  if (taxable.length) {
+    const t = taxTable(taxable);
+    const taxablePortion = t.total > 0 ? t.total * 0.5 : 0;
+    html += `<div class="card"><div class="big" style="margin-bottom:6px;">Taxable — Non-registered</div>
+      <div class="fieldtip" style="margin-bottom:10px;">These gains/losses are reportable to the CRA (Schedule 3). In Canada, <b>50% of a net capital gain is taxable</b>; net capital losses can offset gains in other years.</div>
+      ${t.html}
+      <div class="grid2" style="margin-top:12px;">
+        <div class="stat"><div class="k">Net capital gain / loss</div><div class="v" style="color:${t.total >= 0 ? "var(--green)" : "var(--red)"}">${t.total >= 0 ? "" : "−"}$${Math.abs(t.total).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
+        <div class="stat"><div class="k">Taxable portion (50%)</div><div class="v">$${taxablePortion.toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div></div>
+      ${t.total < 0 ? `<div class="fieldtip" style="margin-top:8px;">A net loss isn't taxed — it can be carried back 3 years or forward to offset future capital gains.</div>` : ""}</div>`;
+  } else {
+    html += `<div class="card muted">No non-registered (taxable) sales in this period.</div>`;
+  }
+  // Sheltered (TFSA / RRSP)
+  if (sheltered.length) {
+    const s = taxTable(sheltered);
+    html += `<div class="card"><div class="big" style="margin-bottom:6px;">Tax-sheltered — TFSA / RRSP</div>
+      <div class="fieldtip" style="margin-bottom:10px;">For your records only. Gains inside a <b>TFSA or RRSP are not taxable</b> and are <b>not</b> reported as capital gains.</div>
+      ${s.html}</div>`;
+  }
+  html += `<div class="card"><div class="fieldtip"><b>Not tax advice.</b> Cost basis shown is per-holding; the CRA requires the <b>average cost (ACB)</b> across all units of the same security — if you bought a stock in multiple lots, confirm the averaged figure. Verify everything with a tax professional before filing.</div></div>`;
+  body.innerHTML = html;
+}
+
+function taxCSV() {
+  const yr = ($("tax-year").value) || "all";
+  const rows = TAX_ROWS.filter((r) => yr === "all" || r.year === yr);
+  if (!rows.length) { alert("Nothing to export for this period."); return; }
+  const header = ["Ticker", "Account", "Taxable", "Buy date", "Buy price", "Quantity", "Cost basis", "Sell date", "Sell price", "Proceeds", "Gain/Loss"];
+  const lines = [header.join(",")];
+  rows.forEach((r) => {
+    lines.push([r.symbol, ACCT_LABEL[r.account] || r.account, r.account === "non_registered" ? "Yes" : "No (sheltered)",
+      r.buyDate || "", r.buyPrice.toFixed(2), r.qty, r.cost.toFixed(2), r.sellDate || "", r.sellPrice.toFixed(2),
+      r.proceeds.toFixed(2), r.gain.toFixed(2)].join(","));
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `iip-capital-gains-${yr}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ====================================================================

@@ -60,7 +60,21 @@
   .verdict-box{ border-radius:12px; padding:16px; margin-bottom:12px; border:1px solid var(--line); }
   .plan-line{ font-size:16px; margin:6px 0; }
   .plan-line b{ color:var(--text); }
+  table.tax{ width:100%; border-collapse:collapse; font-size:13px; }
+  table.tax th, table.tax td{ border:1px solid var(--line); padding:6px 8px; text-align:right; white-space:nowrap; }
+  table.tax th{ color:var(--dim); font-weight:600; text-transform:uppercase; font-size:11px; }
+  table.tax td.l, table.tax th.l{ text-align:left; }
+  .scrollx{ overflow-x:auto; }
   @media (max-width:560px){ .grid4{ grid-template-columns:repeat(2,1fr);} .grid3{ grid-template-columns:repeat(2,1fr);} }
+  @media print{
+    body{ background:#fff; color:#000; }
+    .tabs, .brand, #login, #set-body, .note, #tax-year, #tax-csv, #tax-print, #logout,
+    #view-candidates, #view-bitcoin, #view-analyzer, #view-trades, #view-portfolio,
+    #view-scorecard, #view-settings { display:none !important; }
+    #view-tax, #tax-body{ display:block !important; }
+    table.tax th, table.tax td{ border-color:#999; color:#000; }
+    .card{ border-color:#999; }
+  }
 </style>
 </head>
 <body>
@@ -92,6 +106,7 @@
       <div class="tab" data-tab="analyzer">Analyzer</div>
       <div class="tab" data-tab="trades">Trades</div>
       <div class="tab" data-tab="portfolio">Portfolio</div>
+      <div class="tab" data-tab="tax">Tax</div>
       <div class="tab" data-tab="scorecard">Scorecard</div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
@@ -133,7 +148,7 @@
 
     <!-- TRADES -->
     <section id="view-trades" class="hidden">
-      <div class="note">Your paper-trading track record — practice trades with no real money. Log one to test the system, then "Close" it later to record a win or loss.</div>
+      <div class="note"><b>Paper trades = practice, no real money.</b> Use them to test the system before risking cash. "Close" one to record a win/loss. Owned something for real? Use <b>Add to Portfolio</b>. (Portfolio = what you actually hold.)</div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Log a paper trade</div>
         <div class="grid3">
@@ -153,7 +168,7 @@
 
     <!-- PORTFOLIO -->
     <section id="view-portfolio" class="hidden">
-      <div class="note">What you hold and how it's split. Add positions with an <b>account type</b> (TFSA / RRSP / etc.) for tax tracking. Allocation shows each holding's share of the total.</div>
+      <div class="note"><b>Portfolio = what you actually hold</b> (real or paper). Add holdings with an <b>account type</b> (TFSA / RRSP / non-registered) for tax tracking. "Sell" records the exit so it flows into the Tax report. Use <b>Add as Paper Trade</b> to track one as practice too.</div>
       <div id="p-summary"></div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Add holding</div>
@@ -172,6 +187,17 @@
         <div id="p-msg" class="center" style="font-size:14px; margin-top:10px;"></div>
       </div>
       <div id="p-list"><div class="spinner">Loading…</div></div>
+    </section>
+
+    <!-- TAX -->
+    <section id="view-tax" class="hidden">
+      <div class="note">Year-end / quarterly capital-gains report for <b>Canadian taxes</b>, built from your <b>sold</b> holdings. Only <b>non-registered</b> accounts are taxable — TFSA &amp; RRSP gains are tax-sheltered and shown separately for your records. Export to CSV or print for your return. <b>Not tax advice</b> — verify with a professional.</div>
+      <div class="row wraprow" style="gap:8px; margin-bottom:10px;">
+        <select id="tax-year" style="flex:1; min-width:120px;"></select>
+        <button id="tax-csv" class="btn secondary small" style="flex:1; min-width:120px;">Export CSV</button>
+        <button id="tax-print" class="btn secondary small" style="flex:1; min-width:120px;">Print</button>
+      </div>
+      <div id="tax-body"><div class="spinner">Loading…</div></div>
     </section>
 
     <!-- SCORECARD -->
