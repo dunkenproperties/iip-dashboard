@@ -70,7 +70,7 @@
     body{ background:#fff; color:#000; }
     .tabs, .brand, #login, #set-body, .note, #tax-year, #tax-csv, #tax-print, #logout,
     #view-candidates, #view-bitcoin, #view-analyzer, #view-trades, #view-portfolio,
-    #view-scorecard, #view-settings { display:none !important; }
+    #view-scorecard, #view-alerts, #view-settings { display:none !important; }
     #view-tax, #tax-body{ display:block !important; }
     table.tax th, table.tax td{ border-color:#999; color:#000; }
     .card{ border-color:#999; }
@@ -108,6 +108,7 @@
       <div class="tab" data-tab="portfolio">Portfolio</div>
       <div class="tab" data-tab="tax">Tax</div>
       <div class="tab" data-tab="scorecard">Scorecard</div>
+      <div class="tab" data-tab="alerts">Alerts</div>
       <div class="tab" data-tab="settings">Settings</div>
     </div>
     <div style="height:8px;"></div>
@@ -204,6 +205,31 @@
     <section id="view-scorecard" class="hidden">
       <div class="note">How each of the 7 strategies has voted across all scans. The bar shows its split of <b style="color:var(--green)">buy</b> / <b style="color:var(--yellow)">neutral</b> / <b style="color:var(--red)">avoid</b> calls. Real hit-rate builds up as paper trades close.</div>
       <div id="sc-list"><div class="spinner">Loading…</div></div>
+    </section>
+
+    <!-- ALERTS -->
+    <section id="view-alerts" class="hidden">
+      <div class="note">Tell the system to ping you when something happens — it checks your rules after each scan and sends an email/text. Turn email or SMS <b>on in Settings</b> first; until then alerts are recorded but not sent.</div>
+      <div class="card">
+        <div class="big" style="margin-bottom:6px;">Create an alert</div>
+        <label class="fld">Alert me when…</label>
+        <select id="al-type">
+          <option value="price_above">A stock rises above a price</option>
+          <option value="price_below">A stock falls below a price</option>
+          <option value="rsi_level">A stock's RSI drops to a level (oversold)</option>
+          <option value="signal_flip">A stock's buy/avoid signal flips</option>
+          <option value="cycle_change">Bitcoin's market cycle phase changes</option>
+        </select>
+        <div id="al-ticker-wrap"><label class="fld">Ticker</label><input id="al-ticker" style="text-transform:uppercase;" placeholder="e.g. NVDA" /></div>
+        <div id="al-thr-wrap"><label class="fld" id="al-thr-label">Price $</label><input id="al-thr" type="number" step="any" /></div>
+        <label class="fld">Send it by</label>
+        <select id="al-channel"><option value="email">Email</option><option value="sms">SMS</option><option value="none">Just record it (no message)</option></select>
+        <div class="fieldtip" id="al-hint" style="margin-top:8px;"></div>
+        <div style="height:12px;"></div>
+        <button id="al-add" class="btn" style="width:100%;">Add alert</button>
+        <div id="al-msg" class="center" style="font-size:14px; margin-top:10px;"></div>
+      </div>
+      <div id="al-list"><div class="spinner">Loading…</div></div>
     </section>
 
     <!-- SETTINGS -->

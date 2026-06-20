@@ -25,6 +25,8 @@ async function init() {
   $("tax-year").addEventListener("change", renderTax);
   $("tax-csv").addEventListener("click", taxCSV);
   $("tax-print").addEventListener("click", () => window.print());
+  $("al-type").addEventListener("change", alertRuleUI);
+  $("al-add").addEventListener("click", addAlert);
 }
 function showAuth(session) {
   const authed = !!session;
@@ -45,11 +47,11 @@ $("send-link").addEventListener("click", async () => {
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
 // ---------- tabs ----------
-const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "tax", "scorecard", "settings"];
+const TABS = ["candidates", "bitcoin", "analyzer", "trades", "portfolio", "tax", "scorecard", "alerts", "settings"];
 function activateTab(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
-  const map = { trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, settings: loadSettings };
+  const map = { trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
   if (map[name]) map[name]();
   window.scrollTo(0, 0);
 }
@@ -655,6 +657,82 @@ function taxCSV() {
   a.download = `iip-capital-gains-${yr}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// ====================================================================
+// ALERTS (rules engine — manage rows in `alerts`)
+// ====================================================================
+const ALERT_NEEDS = {
+  price_above: { ticker: true, thr: true, thrLabel: "Price $", hint: "Pings you the moment the stock first crosses above this price." },
+  price_below: { ticker: true, thr: true, thrLabel: "Price $", hint: "Pings you when the stock first drops below this price." },
+  rsi_level: { ticker: true, thr: true, thrLabel: "RSI level (e.g. 30)", hint: "Pings you when RSI falls to this level or lower — often a sign a stock is oversold." },
+  signal_flip: { ticker: true, thr: false, hint: "Pings you when this stock's overall buy/avoid call changes from one scan to the next." },
+  cycle_change: { ticker: false, thr: false, hint: "Pings you when Bitcoin moves into a new phase of its ~4-year cycle (e.g. mid-cycle → late-cycle)." },
+};
+function alertRuleUI() {
+  const t = $("al-type").value, cfg = ALERT_NEEDS[t];
+  $("al-ticker-wrap").style.display = cfg.ticker ? "" : "none";
+  $("al-thr-wrap").style.display = cfg.thr ? "" : "none";
+  if (cfg.thr) $("al-thr-label").textContent = cfg.thrLabel;
+  $("al-hint").textContent = cfg.hint;
+}
+function alertDesc(a) {
+  const s = (a.assets || {}).symbol || "a stock", thr = a.threshold;
+  switch (a.rule_type) {
+    case "price_above": return `When <b>${esc(s)}</b> rises above <b>$${thr}</b>`;
+    case "price_below": return `When <b>${esc(s)}</b> falls below <b>$${thr}</b>`;
+    case "rsi_level": return `When <b>${esc(s)}</b> RSI drops to <b>${thr}</b> or below (oversold)`;
+    case "signal_flip": return `When <b>${esc(s)}</b>'s buy/avoid signal flips`;
+    case "cycle_change": return `When <b>Bitcoin's</b> cycle phase changes`;
+    default: return esc(a.rule_type);
+  }
+}
+async function loadAlerts() {
+  alertRuleUI();
+  const list = $("al-list");
+  const { data, error } = await sb.from("alerts").select("id,rule_type,threshold,channel,is_active,last_triggered,assets(symbol)").order("created_at", { ascending: false });
+  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  if (!data.length) { list.innerHTML = '<div class="card muted">No alerts yet. Create one above.</div>'; return; }
+  list.innerHTML = data.map((a) => {
+    const chTxt = a.channel === "none" ? "record only" : a.channel;
+    return `<div class="card"><div class="row between">
+      <div class="plan-line" style="font-size:15px;">${alertDesc(a)}</div>
+      <span class="pill" style="background:rgba(255,255,255,.06); color:${a.is_active ? "var(--green)" : "var(--dim)"}">${a.is_active ? "ON" : "OFF"}</span></div>
+      <div class="row between" style="margin-top:8px; font-size:13px;">
+        <span class="muted">via ${esc(chTxt)}${a.last_triggered ? " · last fired " + new Date(a.last_triggered).toLocaleDateString() : " · never fired"}</span>
+        <span class="row" style="gap:6px;">
+          <button class="btn secondary small" data-toggle="${a.id}" data-on="${a.is_active ? 1 : 0}">${a.is_active ? "Turn off" : "Turn on"}</button>
+          <button class="btn secondary small" data-del="${a.id}">Delete</button></span></div></div>`;
+  }).join("");
+  list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+    await sb.from("alerts").delete().eq("id", b.dataset.del); loadAlerts();
+  }));
+  list.querySelectorAll("[data-toggle]").forEach((b) => b.addEventListener("click", async () => {
+    await sb.from("alerts").update({ is_active: b.dataset.on !== "1" }).eq("id", b.dataset.toggle); loadAlerts();
+  }));
+}
+async function addAlert() {
+  const msg = $("al-msg"), t = $("al-type").value, cfg = ALERT_NEEDS[t];
+  try {
+    let asset_id = null;
+    if (cfg.ticker) {
+      const sym = $("al-ticker").value.toUpperCase().trim();
+      if (!sym) { msg.innerHTML = '<span class="err">Ticker required for this alert.</span>'; return; }
+      asset_id = await findOrCreateAsset(sym);
+    }
+    let threshold = null;
+    if (cfg.thr) {
+      threshold = parseFloat($("al-thr").value);
+      if (isNaN(threshold)) { msg.innerHTML = '<span class="err">Enter a number for the level.</span>'; return; }
+    }
+    msg.textContent = "Saving…";
+    const { error } = await sb.from("alerts").insert({
+      asset_id, rule_type: t, threshold, channel: $("al-channel").value, is_active: true,
+    });
+    if (error) throw error;
+    $("al-ticker").value = ""; $("al-thr").value = "";
+    msg.innerHTML = '<span class="ok">Alert created.</span>'; loadAlerts();
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
 // ====================================================================
