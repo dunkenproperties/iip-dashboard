@@ -46,12 +46,23 @@ $("send-link").addEventListener("click", async () => {
 });
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
+// ---------- toast ----------
+let TOAST_TIMER = null;
+function showToast(msg, kind = "ok") {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.toggle("warn", kind === "warn");
+  t.classList.add("show");
+  if (TOAST_TIMER) clearTimeout(TOAST_TIMER);
+  TOAST_TIMER = setTimeout(() => t.classList.remove("show"), 2800);
+}
+
 // ---------- tabs ----------
-const TABS = ["candidates", "bitcoin", "analyzer", "social", "trades", "portfolio", "tax", "scorecard", "alerts", "settings"];
+const TABS = ["candidates", "bitcoin", "analyzer", "frameworks", "social", "trades", "portfolio", "tax", "scorecard", "alerts", "settings"];
 function activateTab(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
-  const map = { social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
+  const map = { frameworks: renderFrameworks, social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
   if (map[name]) map[name]();
   window.scrollTo(0, 0);
 }
@@ -434,40 +445,154 @@ $("run-analyzer").addEventListener("click", () => {
   $("analyzer-result").classList.remove("hidden");
 });
 
-// ---- cross-tab prefill (so the ticker/price isn't re-entered) ----
-function prefillPortfolio({ ticker, entry }) {
-  $("p-ticker").value = ticker || "";
-  if (entry != null) $("p-entry").value = entry;
-  activateTab("portfolio");
-  $("p-msg").innerHTML = '<span class="ok">Prefilled from your paper trade — add quantity &amp; account, then save.</span>';
+// ====================================================================
+// FRAMEWORKS — static, plain-English reference for the 7 scoring lenses.
+// Live per-candidate scores wire in later. Copy is owner-supplied and kept verbatim.
+// ====================================================================
+const FW_FAMILIES = [
+  { key: "value",  name: "Value",  color: "var(--blue)",   tag: "buying cheap" },
+  { key: "growth", name: "Growth", color: "var(--teal)",   tag: "buying expansion" },
+  { key: "quant",  name: "Quant",  color: "var(--yellow)", tag: "following the trend" },
+  { key: "risk",   name: "Risk",   color: "var(--red)",    tag: "veto layer — can block a buy" },
+];
+const FRAMEWORKS_INFO = [
+  {
+    key: "graham", name: "Graham", family: "value",
+    lead: "The bargain hunter. Looks for stocks trading below what the company is actually worth, so you're buying a dollar for 70 cents. High score = cheap relative to its real value.",
+    whatIs: "The bargain hunter. Looks for stocks trading below what the company is actually worth, so you're buying a dollar for 70 cents.",
+    whoFrom: "Benjamin Graham — the father of value investing and Warren Buffett's teacher; he bought companies for less than their parts were worth.",
+    looksAt: ["The price versus the company's real, underlying worth", "A strong, low-debt balance sheet", "How little you're paying for each dollar of earnings"],
+    howToRead: "High score = cheap relative to its real value. Low score = expensive, so less margin of safety.",
+  },
+  {
+    key: "buffett", name: "Buffett", family: "value",
+    lead: "The quality buyer. Looks for strong, durable companies with a real edge over competitors. High score = a great business, not just a cheap one.",
+    whatIs: "The quality buyer. Looks for strong, durable companies with a real edge over competitors.",
+    whoFrom: "Warren Buffett — buys wonderful businesses he can hold for years, and lets them compound.",
+    looksAt: ["A durable competitive edge (a \"moat\")", "High, steady profit margins", "Plenty of spare cash thrown off by the business"],
+    howToRead: "High score = a great business, not just a cheap one. Low score = an ordinary business without a clear edge.",
+  },
+  {
+    key: "magic", name: "Magic Formula", family: "value",
+    lead: "A simple two-part test: is the company cheap, AND does it earn good returns on its money? High score = both at once — good company at a fair price.",
+    whatIs: "A simple two-part test: is the company cheap, AND does it earn good returns on its money?",
+    whoFrom: "Joel Greenblatt — ranked companies on cheapness and quality together, and bought the best of both.",
+    looksAt: ["Is it cheap (earnings yield)?", "Does it earn high returns on the capital it uses?", "Both ranked together, not one in isolation"],
+    howToRead: "High score = both at once — good company at a fair price. Low score = either pricey or low-quality (or both).",
+  },
+  {
+    key: "lynch", name: "Lynch", family: "growth",
+    lead: "Buys growth without overpaying. Likes companies growing fast but still reasonably priced. High score = growing quickly without being expensive.",
+    whatIs: "Buys growth without overpaying. Likes companies growing fast but still reasonably priced.",
+    whoFrom: "Peter Lynch — looked for fast growers the market hadn't fully priced in yet.",
+    looksAt: ["Fast earnings growth", "A price that's still reasonable for that growth", "Not already over-hyped"],
+    howToRead: "High score = growing quickly without being expensive. Low score = either slow-growing or priced for perfection.",
+  },
+  {
+    key: "momentum", name: "Momentum", family: "quant",
+    lead: "Follows the trend. Stocks going up tend to keep going up for a while. High score = strong recent price strength and direction.",
+    whatIs: "Follows the trend. Stocks going up tend to keep going up for a while.",
+    whoFrom: "Cliff Asness / AQR — showed systematically that recent winners tend to keep winning for a while.",
+    looksAt: ["Strong recent price performance", "Trading above its long-term trend line", "Steady direction rather than wild swings"],
+    howToRead: "High score = strong recent price strength and direction. Low score = weak, falling, or directionless.",
+  },
+  {
+    key: "marks", name: "Marks", family: "risk",
+    lead: "The cycle reader. Asks where we are in the market cycle and whether risk is being rewarded or ignored. High score = good risk/reward for where the market is right now.",
+    whatIs: "The cycle reader. Asks where we are in the market cycle and whether risk is being rewarded or ignored.",
+    whoFrom: "Howard Marks — famous for reading market cycles and buying when others are fearful.",
+    looksAt: ["Where we are in the market cycle", "Whether you're being paid to take the risk", "Crowd fear versus greed"],
+    howToRead: "High score = good risk/reward for where the market is right now. Low score = you're taking risk that isn't being rewarded.",
+  },
+  {
+    key: "taleb", name: "Taleb", family: "risk",
+    lead: "The survivor. Focuses on what could blow up and avoiding catastrophic loss. This one can veto a buy even if every other score is high. High score = limited downside / safe from a crash.",
+    whatIs: "The survivor. Focuses on what could blow up and avoiding catastrophic loss. This one can veto a buy even if every other score is high.",
+    whoFrom: "Nassim Taleb — obsessed with surviving rare, catastrophic shocks rather than chasing the last dollar of gain.",
+    looksAt: ["How much could go wrong in a worst case", "Low debt and the ability to survive shocks", "Avoiding bets that can wipe you out"],
+    howToRead: "High score = limited downside / safe from a crash. Low score = fragile, with the risk of a catastrophic loss — and it can override the other six.",
+  },
+];
+const FW_BY_KEY = Object.fromEntries(FRAMEWORKS_INFO.map((f) => [f.key, f]));
+
+function renderFrameworks() {
+  const list = $("fw-list");
+  if (list.dataset.built) return;   // static content — build once
+  const famColor = Object.fromEntries(FW_FAMILIES.map((f) => [f.key, f.color]));
+  let html = "";
+  FW_FAMILIES.forEach((fam) => {
+    const members = FRAMEWORKS_INFO.filter((f) => f.family === fam.key);
+    html += `<div class="fam-head">
+        <span class="fam-dot" style="background:${fam.color}"></span>
+        <span class="fam-name" style="color:${fam.color}">${esc(fam.name)}</span>
+        <span class="fam-tag">${esc(fam.tag)}</span></div>`;
+    html += members.map((f) => `<div class="fwcard" data-fw="${f.key}" style="border-left-color:${fam.color}">
+        <div class="row between">
+          <div><span class="tk" style="font-size:17px;">${esc(f.name)}</span>
+            <div class="nm" style="margin-top:3px; line-height:1.4;">${esc(f.whatIs)}</div></div>
+          <span class="arrow">›</span></div></div>`).join("");
+  });
+  html += `<div class="composite">
+      <div class="row between"><div class="tk" style="font-size:17px; color:var(--purple)">Composite Score</div>
+        <span class="linkpill">all 7 combined</span></div>
+      <div class="fieldtip" style="margin-top:8px; font-size:14px; color:var(--muted)">Agreement across families = high conviction. Disagreement = the signal worth reading.</div></div>`;
+  list.innerHTML = html;
+  list.dataset.built = "1";
+  list.querySelectorAll("[data-fw]").forEach((c) => c.addEventListener("click", () => openFwPanel(c.dataset.fw)));
 }
-function prefillTrade({ ticker, entry, stop, target }) {
-  $("t-ticker").value = ticker || "";
-  if (entry != null) $("t-entry").value = entry;
-  if (stop != null) $("t-stop").value = stop;
-  if (target != null) $("t-target").value = target;
-  activateTab("trades");
-  $("t-msg").innerHTML = '<span class="ok">Prefilled from your holding — adjust and save as a paper trade.</span>';
+
+function openFwPanel(key) {
+  const f = FW_BY_KEY[key];
+  if (!f) return;
+  const fam = FW_FAMILIES.find((x) => x.key === f.family) || {};
+  const panel = $("fw-panel"), backdrop = $("fw-backdrop");
+  panel.innerHTML = `
+    <button class="fw-close" aria-label="Close" id="fw-close">×</button>
+    <div class="pill" style="background:rgba(255,255,255,.06); color:${fam.color}; display:inline-block;">${esc(fam.name)} family</div>
+    <h2>${esc(f.name)}</h2>
+    <div class="fw-lead">${esc(f.lead)}</div>
+    <div class="fw-sect"><div class="lbl">What it is</div><p>${esc(f.whatIs)}</p></div>
+    <div class="fw-sect"><div class="lbl">Who it's from</div><p>${esc(f.whoFrom)}</p></div>
+    <div class="fw-sect"><div class="lbl">What it looks at</div><ul>${f.looksAt.map((b) => `<li>${esc(b)}</li>`).join("")}</ul></div>
+    <div class="fw-sect"><div class="lbl">How to read the score</div><p>${esc(f.howToRead)}</p></div>
+    ${f.family === "risk" ? `<div class="fw-sect"><span class="linkpill" style="background:rgba(255,93,93,.12); color:var(--red); border-color:rgba(255,93,93,.35)">Veto layer — can block a buy on its own</span></div>` : ""}`;
+  backdrop.classList.remove("hidden");
+  // allow the browser to paint the un-hidden state before transitioning in
+  requestAnimationFrame(() => { backdrop.classList.add("show"); panel.classList.add("show"); });
+  panel.setAttribute("aria-hidden", "false");
+  $("fw-close").addEventListener("click", closeFwPanel);
 }
+function closeFwPanel() {
+  const panel = $("fw-panel"), backdrop = $("fw-backdrop");
+  panel.classList.remove("show"); backdrop.classList.remove("show");
+  panel.setAttribute("aria-hidden", "true");
+  setTimeout(() => backdrop.classList.add("hidden"), 240);
+}
+$("fw-backdrop").addEventListener("click", closeFwPanel);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFwPanel(); });
 
 // ====================================================================
 // TRADES (paper_trades)
 // ====================================================================
+let TRADES_BY_ID = {};
 async function loadTrades() {
   const list = $("t-list");
   const { data, error } = await sb.from("paper_trades")
-    .select("id,entry_price,stop_loss,target,conviction_at_entry,position_size_pct,entry_date,exit_price,outcome,assets(symbol)")
+    .select("id,asset_id,position_id,entry_price,stop_loss,target,conviction_at_entry,position_size_pct,entry_date,exit_price,exit_date,outcome,assets(symbol)")
     .order("entry_date", { ascending: false });
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
   if (!data.length) { list.innerHTML = '<div class="card muted">No paper trades yet. Log your first above to start the track record.</div>'; return; }
+  TRADES_BY_ID = {}; data.forEach((t) => (TRADES_BY_ID[t.id] = t));
   list.innerHTML = data.map((t) => {
     const a = t.assets || {};
     const rr = (t.target && t.entry_price && t.stop_loss) ? ((t.target - t.entry_price) / (t.entry_price - t.stop_loss)).toFixed(1) : "—";
     const oc = t.outcome || "open";
     const ocColor = oc === "win" ? "var(--green)" : oc === "loss" ? "var(--red)" : "var(--yellow)";
+    const linked = !!t.position_id;
     return `<div class="card"><div class="row between">
       <span class="tk">${esc(a.symbol)}</span>
-      <span class="pill" style="background:rgba(255,255,255,.06); color:${ocColor}">${oc.toUpperCase()}</span></div>
+      <div class="row" style="gap:6px;">${linked ? `<span class="linkpill">↔ in Portfolio</span>` : ""}
+        <span class="pill" style="background:rgba(255,255,255,.06); color:${ocColor}">${oc.toUpperCase()}</span></div></div>
       <div class="grid4" style="margin-top:10px;">
         <div class="stat"><div class="k">Entry</div><div class="v">${money(t.entry_price)}</div></div>
         <div class="stat"><div class="k">Stop</div><div class="v" style="color:var(--red)">${money(t.stop_loss)}</div></div>
@@ -475,23 +600,65 @@ async function loadTrades() {
         <div class="stat"><div class="k">R:R</div><div class="v">${rr}:1</div></div></div>
       <div class="muted" style="margin-top:10px; font-size:13px;">conv ${num(t.conviction_at_entry, 1)} · size ${num(t.position_size_pct, 1)}% · ${t.entry_date || ""}${oc !== "open" ? " · exit " + money(t.exit_price) : ""}</div>
       <div class="row wraprow" style="gap:6px; margin-top:8px;">
-        ${oc === "open" ? `<button class="btn secondary small" data-close="${t.id}" data-entry="${t.entry_price}">Close (win/loss)</button>` : ""}
-        <button class="btn secondary small" data-topf-sym="${esc(a.symbol)}" data-topf-entry="${t.entry_price ?? ""}">Add to Portfolio</button>
+        ${oc === "open" ? `<button class="btn secondary small" data-close="${t.id}">Close (win/loss)</button>` : ""}
+        <button class="btn secondary small" data-topf="${t.id}">${linked ? "Update Portfolio" : "Add to Portfolio"}</button>
         <button class="btn secondary small" data-del="${t.id}">Delete</button></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-    await sb.from("paper_trades").delete().eq("id", b.dataset.del); loadTrades();
+    await sb.from("paper_trades").delete().eq("id", b.dataset.del); showToast("Paper trade deleted."); loadTrades();
   }));
-  list.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", async () => {
-    const exit = parseFloat(prompt("Exit price?"));
-    if (!exit) return;
-    const entry = parseFloat(b.dataset.entry);
-    const outcome = exit >= entry ? "win" : "loss";
-    await sb.from("paper_trades").update({ exit_price: exit, exit_date: new Date().toISOString().slice(0, 10), outcome }).eq("id", b.dataset.close);
+  list.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => closeTrade(b.dataset.close)));
+  list.querySelectorAll("[data-topf]").forEach((b) => b.addEventListener("click", () => addTradeToPortfolio(b.dataset.topf)));
+}
+
+// Close a paper trade and, if it's linked, close the matching Portfolio holding too.
+async function closeTrade(id) {
+  const t = TRADES_BY_ID[id]; if (!t) return;
+  const exit = parseFloat(prompt("Exit price?"));
+  if (!exit) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const outcome = exit >= (Number(t.entry_price) || 0) ? "win" : "loss";
+  try {
+    const { error } = await sb.from("paper_trades").update({ exit_price: exit, exit_date: today, outcome }).eq("id", id);
+    if (error) throw error;
+    let alsoClosed = false;
+    if (t.position_id) {
+      const { data: pos } = await sb.from("positions").select("quantity,entry_price,cost_basis,is_open").eq("id", t.position_id).limit(1);
+      if (pos && pos[0] && pos[0].is_open) {
+        const qty = Number(pos[0].quantity) || 0;
+        const cost = pos[0].cost_basis != null ? Number(pos[0].cost_basis) : (Number(pos[0].entry_price) || 0) * qty;
+        const realized = qty ? exit * qty - cost : null;
+        await sb.from("positions").update({ is_open: false, exit_price: exit, exit_date: today, realized_pnl: realized }).eq("id", t.position_id);
+        alsoClosed = true;
+      }
+    }
+    showToast(alsoClosed ? `Trade closed (${outcome}) — linked holding closed too.` : `Trade closed (${outcome}).`);
     loadTrades();
-  }));
-  list.querySelectorAll("[data-topf-sym]").forEach((b) => b.addEventListener("click", () =>
-    prefillPortfolio({ ticker: b.dataset.topfSym, entry: b.dataset.topfEntry || null })));
+  } catch (e) { showToast(e.message, "warn"); }
+}
+
+// One-click: create or update the matching Portfolio holding for this trade. No duplicates.
+async function addTradeToPortfolio(id) {
+  const t = TRADES_BY_ID[id]; if (!t) return;
+  try {
+    if (t.position_id) {
+      const { data: pos } = await sb.from("positions").select("id").eq("id", t.position_id).limit(1);
+      if (pos && pos[0]) {
+        const { error } = await sb.from("positions").update({
+          entry_price: t.entry_price, entry_date: t.entry_date, stop_loss: t.stop_loss, target: t.target,
+        }).eq("id", t.position_id);
+        if (error) throw error;
+        showToast("Updated the linked holding in Portfolio."); loadTrades(); return;
+      }
+    }
+    const { data: ins, error } = await sb.from("positions").insert({
+      asset_id: t.asset_id, entry_price: t.entry_price, entry_date: t.entry_date || new Date().toISOString().slice(0, 10),
+      stop_loss: t.stop_loss, target: t.target, account_type: "paper", is_open: true,
+    }).select("id");
+    if (error) throw error;
+    await sb.from("paper_trades").update({ position_id: ins[0].id }).eq("id", id);
+    showToast("Added to Portfolio."); loadTrades();
+  } catch (e) { showToast(e.message, "warn"); }
 }
 $("t-add").addEventListener("click", async () => {
   const msg = $("t-msg");
@@ -514,13 +681,21 @@ $("t-add").addEventListener("click", async () => {
 // ====================================================================
 // PORTFOLIO (positions)
 // ====================================================================
+let POSITIONS_BY_ID = {};
 async function loadPortfolio() {
   const list = $("p-list"), summary = $("p-summary");
   const { data, error } = await sb.from("positions")
-    .select("id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,stop_loss,target,assets(symbol,name)")
+    .select("id,asset_id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,stop_loss,target,assets(symbol,name)")
     .eq("is_open", true).order("entry_date", { ascending: false });
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; summary.innerHTML = ""; return; }
   if (!data.length) { summary.innerHTML = ""; list.innerHTML = '<div class="card muted">No holdings yet. Add one below.</div>'; return; }
+  POSITIONS_BY_ID = {}; data.forEach((p) => (POSITIONS_BY_ID[p.id] = p));
+  // which holdings are already linked to a paper trade (for the badge + dedup display)
+  const linkedSet = new Set();
+  try {
+    const { data: links } = await sb.from("paper_trades").select("position_id").not("position_id", "is", null);
+    (links || []).forEach((r) => linkedSet.add(r.position_id));
+  } catch (e) { /* non-fatal */ }
   const valued = data.map((p) => ({ ...p, value: (Number(p.quantity) || 0) * (Number(p.entry_price) || 0) }));
   const total = valued.reduce((s, p) => s + p.value, 0);
   summary.innerHTML = `<div class="card"><div class="row between">
@@ -528,9 +703,11 @@ async function loadPortfolio() {
       <div class="center"><div class="dim" style="font-size:12px;">HOLDINGS</div><div class="big">${valued.length}</div></div></div></div>`;
   list.innerHTML = valued.map((p) => {
     const a = p.assets || {}, alloc = total ? (p.value / total) * 100 : 0;
+    const linked = linkedSet.has(p.id);
     return `<div class="card"><div class="row between">
       <div><span class="tk">${esc(a.symbol)}</span> <span class="nm">${esc(a.name)}</span></div>
-      <span class="pill" style="background:rgba(255,255,255,.06); color:var(--teal)">${esc((p.account_type || "").toUpperCase())}</span></div>
+      <div class="row" style="gap:6px;">${linked ? `<span class="linkpill">↔ logged as trade</span>` : ""}
+        <span class="pill" style="background:rgba(255,255,255,.06); color:var(--teal)">${esc((p.account_type || "").toUpperCase())}</span></div></div>
       <div class="grid4" style="margin-top:10px;">
         <div class="stat"><div class="k">Qty</div><div class="v">${num(p.quantity, 2)}</div></div>
         <div class="stat"><div class="k">Entry</div><div class="v">${money(p.entry_price)}</div></div>
@@ -539,27 +716,77 @@ async function loadPortfolio() {
       <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${alloc}%; background:var(--teal)"></div></div>
       <div class="muted" style="margin-top:8px; font-size:13px;">cost basis ${money(p.cost_basis)} · bought ${p.entry_date || "—"}</div>
       <div class="row wraprow" style="gap:6px; margin-top:8px;">
-        <button class="btn secondary small" data-sell="${p.id}" data-qty="${p.quantity ?? ""}" data-entry="${p.entry_price ?? ""}" data-cost="${p.cost_basis ?? ""}">Sell</button>
-        <button class="btn secondary small" data-topt-sym="${esc(a.symbol)}" data-topt-entry="${p.entry_price ?? ""}" data-topt-stop="${p.stop_loss ?? ""}" data-topt-target="${p.target ?? ""}">Add as Paper Trade</button>
+        <button class="btn secondary small" data-sell="${p.id}">Sell</button>
+        <button class="btn secondary small" data-logt="${p.id}">${linked ? "Update Trade" : "Log as Trade"}</button>
         <button class="btn secondary small" data-del="${p.id}">Delete</button></div></div>`;
   }).join("");
-  list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Delete this holding entirely? (Use Sell instead to keep it for tax records.)")) return;
-    await sb.from("positions").delete().eq("id", b.dataset.del); loadPortfolio();
-  }));
-  list.querySelectorAll("[data-sell]").forEach((b) => b.addEventListener("click", async () => {
-    const exit = parseFloat(prompt("Sell price per share?"));
-    if (!exit) return;
-    const qty = parseFloat(b.dataset.qty) || 0;
-    const cost = parseFloat(b.dataset.cost) || (parseFloat(b.dataset.entry) || 0) * qty;
-    const realized = exit * qty - cost;
-    await sb.from("positions").update({
-      is_open: false, exit_price: exit, exit_date: new Date().toISOString().slice(0, 10), realized_pnl: realized,
-    }).eq("id", b.dataset.sell);
+  list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => deletePosition(b.dataset.del)));
+  list.querySelectorAll("[data-sell]").forEach((b) => b.addEventListener("click", () => sellPosition(b.dataset.sell)));
+  list.querySelectorAll("[data-logt]").forEach((b) => b.addEventListener("click", () => logPositionAsTrade(b.dataset.logt)));
+}
+
+// Sell a holding and, if linked, close the matching paper trade too.
+async function sellPosition(id) {
+  const p = POSITIONS_BY_ID[id]; if (!p) return;
+  const exit = parseFloat(prompt("Sell price per share?"));
+  if (!exit) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const qty = Number(p.quantity) || 0;
+  const cost = p.cost_basis != null ? Number(p.cost_basis) : (Number(p.entry_price) || 0) * qty;
+  try {
+    const { error } = await sb.from("positions").update({
+      is_open: false, exit_price: exit, exit_date: today, realized_pnl: exit * qty - cost,
+    }).eq("id", id);
+    if (error) throw error;
+    let alsoClosed = false;
+    const { data: linked } = await sb.from("paper_trades").select("id,entry_price,outcome").eq("position_id", id).limit(1);
+    if (linked && linked[0] && linked[0].outcome === "open") {
+      const outcome = exit >= (Number(linked[0].entry_price) || 0) ? "win" : "loss";
+      await sb.from("paper_trades").update({ exit_price: exit, exit_date: today, outcome }).eq("id", linked[0].id);
+      alsoClosed = true;
+    }
+    showToast(alsoClosed ? "Holding sold — linked paper trade closed too." : "Holding sold.");
     loadPortfolio();
-  }));
-  list.querySelectorAll("[data-topt-sym]").forEach((b) => b.addEventListener("click", () =>
-    prefillTrade({ ticker: b.dataset.toptSym, entry: b.dataset.toptEntry || null, stop: b.dataset.toptStop || null, target: b.dataset.toptTarget || null })));
+  } catch (e) { showToast(e.message, "warn"); }
+}
+
+// Delete a holding; if a paper trade is linked, flag it (the link auto-nulls on delete).
+async function deletePosition(id) {
+  if (!confirm("Delete this holding entirely? (Use Sell instead to keep it for tax records.)")) return;
+  try {
+    const { data: linked } = await sb.from("paper_trades").select("id,post_analysis").eq("position_id", id).limit(1);
+    let flagged = false;
+    if (linked && linked[0]) {
+      const flag = "⚠ Linked Portfolio holding was deleted on " + new Date().toISOString().slice(0, 10) + ".";
+      const note = linked[0].post_analysis ? linked[0].post_analysis + " " + flag : flag;
+      await sb.from("paper_trades").update({ post_analysis: note }).eq("id", linked[0].id);
+      flagged = true;
+    }
+    await sb.from("positions").delete().eq("id", id);
+    showToast(flagged ? "Holding deleted — linked paper trade flagged." : "Holding deleted.", flagged ? "warn" : "ok");
+    loadPortfolio();
+  } catch (e) { showToast(e.message, "warn"); }
+}
+
+// One-click: create or update the matching paper trade for this holding. No duplicates.
+async function logPositionAsTrade(id) {
+  const p = POSITIONS_BY_ID[id]; if (!p) return;
+  try {
+    const { data: existing } = await sb.from("paper_trades").select("id").eq("position_id", id).limit(1);
+    if (existing && existing[0]) {
+      const { error } = await sb.from("paper_trades").update({
+        entry_price: p.entry_price, stop_loss: p.stop_loss, target: p.target, entry_date: p.entry_date,
+      }).eq("id", existing[0].id);
+      if (error) throw error;
+      showToast("Updated the linked paper trade."); loadPortfolio(); return;
+    }
+    const { error } = await sb.from("paper_trades").insert({
+      asset_id: p.asset_id, entry_price: p.entry_price, stop_loss: p.stop_loss, target: p.target,
+      entry_date: p.entry_date || new Date().toISOString().slice(0, 10), outcome: "open", position_id: id,
+    });
+    if (error) throw error;
+    showToast("Logged as a paper trade."); loadPortfolio();
+  } catch (e) { showToast(e.message, "warn"); }
 }
 $("p-add").addEventListener("click", async () => {
   const msg = $("p-msg");

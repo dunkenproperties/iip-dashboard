@@ -8,6 +8,7 @@
   :root{
     --bg:#0b0f0d; --panel:#121815; --panel2:#0f1411; --line:#1f2a24;
     --green:#00ff87; --teal:#39d8c8; --yellow:#ffd93d; --red:#ff5d5d;
+    --blue:#4ea1ff; --purple:#b388ff;
     --text:#e8f0ec; --muted:#9fb1a8; --dim:#5f726a;
   }
   *{box-sizing:border-box;}
@@ -65,11 +66,52 @@
   table.tax th{ color:var(--dim); font-weight:600; text-transform:uppercase; font-size:11px; }
   table.tax td.l, table.tax th.l{ text-align:left; }
   .scrollx{ overflow-x:auto; }
+  .linkpill{ font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; letter-spacing:.3px;
+    background:rgba(179,136,255,.12); color:var(--purple); border:1px solid rgba(179,136,255,.35); }
+  /* ---- Frameworks tab ---- */
+  .fam-head{ display:flex; align-items:center; gap:8px; margin:18px 2px 8px; }
+  .fam-dot{ width:11px; height:11px; border-radius:3px; flex:0 0 auto; }
+  .fam-name{ font-weight:800; font-size:14px; letter-spacing:.4px; text-transform:uppercase; }
+  .fam-tag{ font-size:12px; color:var(--dim); }
+  .fwcard{ background:var(--panel); border:1px solid var(--line); border-left-width:4px; border-radius:12px;
+    padding:13px 15px; margin-bottom:10px; cursor:pointer; transition:transform .08s ease, border-color .12s ease; }
+  .fwcard:hover{ transform:translateX(2px); }
+  .fwcard:active{ transform:scale(.99); }
+  .fwcard .arrow{ color:var(--dim); font-size:20px; line-height:1; }
+  .composite{ background:rgba(179,136,255,.07); border:1px solid rgba(179,136,255,.4);
+    border-radius:12px; padding:15px 16px; margin-top:20px; }
+  /* ---- slide-out panel ---- */
+  .fw-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:40; opacity:0;
+    transition:opacity .2s ease; }
+  .fw-backdrop.show{ opacity:1; }
+  .fw-panel{ position:fixed; top:0; right:0; height:100%; width:min(440px,90vw); z-index:41;
+    background:var(--panel); border-left:1px solid var(--line); box-shadow:-12px 0 40px rgba(0,0,0,.5);
+    transform:translateX(100%); transition:transform .24s cubic-bezier(.2,.8,.2,1);
+    overflow-y:auto; -webkit-overflow-scrolling:touch; padding:18px 18px 40px; }
+  .fw-panel.show{ transform:translateX(0); }
+  .fw-panel h2{ font-size:22px; margin:6px 0 2px; }
+  .fw-panel .fw-close{ position:sticky; top:0; float:right; background:var(--panel2); border:1px solid var(--line);
+    color:var(--text); width:34px; height:34px; border-radius:9px; font-size:18px; cursor:pointer; line-height:1; }
+  .fw-sect{ margin-top:16px; }
+  .fw-sect .lbl{ font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--dim); margin-bottom:5px; font-weight:700; }
+  .fw-sect p{ margin:0; font-size:15px; line-height:1.5; }
+  .fw-sect ul{ margin:0; padding-left:18px; }
+  .fw-sect li{ font-size:15px; line-height:1.5; margin:3px 0; }
+  .fw-lead{ font-size:15px; line-height:1.55; background:var(--panel2); border:1px solid var(--line);
+    border-radius:9px; padding:11px 13px; margin-top:12px; }
+  /* ---- toast ---- */
+  #toast{ position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(20px);
+    background:var(--panel); color:var(--text); border:1px solid var(--green); border-left:4px solid var(--green);
+    border-radius:10px; padding:12px 16px; font-size:14px; font-weight:600; z-index:60; max-width:90vw;
+    box-shadow:0 8px 30px rgba(0,0,0,.45); opacity:0; pointer-events:none; transition:opacity .2s ease, transform .2s ease; }
+  #toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+  #toast.warn{ border-color:var(--yellow); border-left-color:var(--yellow); }
   @media (max-width:560px){ .grid4{ grid-template-columns:repeat(2,1fr);} .grid3{ grid-template-columns:repeat(2,1fr);} }
   @media print{
     body{ background:#fff; color:#000; }
     .tabs, .brand, #login, #set-body, .note, #tax-year, #tax-csv, #tax-print, #logout,
-    #view-candidates, #view-bitcoin, #view-analyzer, #view-social, #view-trades, #view-portfolio,
+    #fw-panel, #fw-backdrop, #toast,
+    #view-candidates, #view-bitcoin, #view-analyzer, #view-frameworks, #view-social, #view-trades, #view-portfolio,
     #view-scorecard, #view-alerts, #view-settings { display:none !important; }
     #view-tax, #tax-body{ display:block !important; }
     table.tax th, table.tax td{ border-color:#999; color:#000; }
@@ -104,6 +146,7 @@
       <div class="tab active" data-tab="candidates">Candidates</div>
       <div class="tab" data-tab="bitcoin">Bitcoin</div>
       <div class="tab" data-tab="analyzer">Analyzer</div>
+      <div class="tab" data-tab="frameworks">Frameworks</div>
       <div class="tab" data-tab="social">Social</div>
       <div class="tab" data-tab="trades">Trades</div>
       <div class="tab" data-tab="portfolio">Portfolio</div>
@@ -148,6 +191,12 @@
       <div id="analyzer-result" class="hidden"></div>
     </section>
 
+    <!-- FRAMEWORKS -->
+    <section id="view-frameworks" class="hidden">
+      <div class="note">These are the 7 lenses the system uses to score every stock. Tap any one to see what it means in plain English.</div>
+      <div id="fw-list"></div>
+    </section>
+
     <!-- SOCIAL -->
     <section id="view-social" class="hidden">
       <div class="note"><b>Social signals</b> — what ordinary people are searching for and posting about, often <i>before</i> it shows up in the financials (Chris Camillo's "social arbitrage"). A higher score = more unusual, fast-rising attention worth a closer look.</div>
@@ -156,7 +205,7 @@
 
     <!-- TRADES -->
     <section id="view-trades" class="hidden">
-      <div class="note"><b>Paper trades = practice, no real money.</b> Use them to test the system before risking cash. "Close" one to record a win/loss. Owned something for real? Use <b>Add to Portfolio</b>. (Portfolio = what you actually hold.)</div>
+      <div class="note"><b>Paper trades = practice, no real money.</b> Use them to test the system before risking cash. "Close" one to record a win/loss. Owned something for real? Tap <b>Add to Portfolio</b> — it creates a linked holding in one click and stays in sync. (Portfolio = what you actually hold.)</div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Log a paper trade</div>
         <div class="grid3">
@@ -176,7 +225,7 @@
 
     <!-- PORTFOLIO -->
     <section id="view-portfolio" class="hidden">
-      <div class="note"><b>Portfolio = what you actually hold</b> (real or paper). Add holdings with an <b>account type</b> (TFSA / RRSP / non-registered) for tax tracking. "Sell" records the exit so it flows into the Tax report. Use <b>Add as Paper Trade</b> to track one as practice too.</div>
+      <div class="note"><b>Portfolio = what you actually hold</b> (real or paper). Add holdings with an <b>account type</b> (TFSA / RRSP / non-registered) for tax tracking. "Sell" records the exit so it flows into the Tax report. Tap <b>Log as Trade</b> to track one in the Trades tab too — the two stay linked in one click.</div>
       <div id="p-summary"></div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Add holding</div>
@@ -249,6 +298,13 @@
       <button id="logout" class="btn secondary small">Sign out</button>
     </div>
   </div>
+
+  <!-- Frameworks slide-out panel -->
+  <div id="fw-backdrop" class="fw-backdrop hidden"></div>
+  <aside id="fw-panel" class="fw-panel" aria-hidden="true" role="dialog" aria-label="Framework detail"></aside>
+
+  <!-- toast -->
+  <div id="toast" role="status" aria-live="polite"></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
