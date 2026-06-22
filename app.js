@@ -17,9 +17,24 @@ const VERDICT_COLOR = { BUY: "var(--green)", NEUTRAL: "var(--yellow)", AVOID: "v
 function convColor(s) { return s >= 7 ? "var(--green)" : s >= 5.5 ? "var(--teal)" : s >= 4 ? "var(--yellow)" : "var(--red)"; }
 
 // ---------- auth ----------
+// A clicked magic link returns here either with a session (handled by detectSessionInUrl)
+// or, if the link expired / was already used, with an error in the URL hash or query.
+// Surface that instead of silently showing the login form again.
+function authErrorFromUrl() {
+  const h = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+  const q = new URLSearchParams(location.search || "");
+  const desc = h.get("error_description") || q.get("error_description");
+  const code = h.get("error_code") || q.get("error_code") || h.get("error") || q.get("error");
+  if (!desc && !code) return null;
+  return desc ? decodeURIComponent(desc.replace(/\+/g, " ")) : code;
+}
 async function init() {
   const { data: { session } } = await sb.auth.getSession();
   showAuth(session);
+  if (!session) {
+    const e = authErrorFromUrl();
+    if (e) $("login-msg").innerHTML = `<span class="err">That login link didn't work: ${esc(e)}.</span><div class="dim" style="font-size:12px; margin-top:4px;">Request a fresh one below — links expire and are single-use.</div>`;
+  }
   sb.auth.onAuthStateChange((_e, s) => showAuth(s));
   buildAnalyzerFields();
   $("tax-year").addEventListener("change", renderTax);
@@ -40,9 +55,22 @@ $("send-link").addEventListener("click", async () => {
   const msg = $("login-msg");
   if (!email) { msg.innerHTML = '<span class="err">Enter your email.</span>'; return; }
   $("send-link").disabled = true; msg.textContent = "Sending…";
-  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
+  // shouldCreateUser:false — this is a private, owner-locked dashboard; a typo'd address
+  // should error rather than silently create a new (RLS-blocked) account.
+  const { error } = await sb.auth.signInWithOtp({
+    email, options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: false },
+  });
   $("send-link").disabled = false;
-  msg.innerHTML = error ? `<span class="err">${esc(error.message)}</span>` : '<span class="ok">Check your email and click the login link.</span>';
+  if (!error) {
+    msg.innerHTML = '<span class="ok">Link sent — check your inbox and spam. It expires in 1 hour and works once.</span>';
+    return;
+  }
+  // Friendlier mapping for the common cases.
+  let txt = error.message || "Could not send the link.";
+  if (/signups? not allowed|not authoriz/i.test(txt)) txt = "That email isn't a registered owner of this dashboard.";
+  const wait = /after (\d+) seconds/i.exec(error.message || "");
+  msg.innerHTML = `<span class="err">${esc(txt)}</span>`
+    + (wait ? `<div class="dim" style="font-size:12px; margin-top:4px;">Too many requests — wait ${wait[1]}s and try again.</div>` : "");
 });
 $("logout").addEventListener("click", () => sb.auth.signOut());
 
