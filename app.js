@@ -42,37 +42,85 @@ async function init() {
   $("tax-print").addEventListener("click", () => window.print());
   $("al-type").addEventListener("change", alertRuleUI);
   $("al-add").addEventListener("click", addAlert);
+  $("disc-ok").addEventListener("click", acknowledgeDisclaimer);
 }
 function showAuth(session) {
   const authed = !!session;
   $("login").classList.toggle("hidden", authed);
   $("app").classList.toggle("hidden", !authed);
   $("hdr-right").textContent = authed ? (session.user.email || "") : "";
-  if (authed) loadAll();
+  if (authed) { maybeShowDisclaimer(); loadAll(); }
 }
 $("send-link").addEventListener("click", async () => {
   const email = $("email").value.trim();
   const msg = $("login-msg");
   if (!email) { msg.innerHTML = '<span class="err">Enter your email.</span>'; return; }
   $("send-link").disabled = true; msg.textContent = "Sending…";
-  // shouldCreateUser:false — this is a private, owner-locked dashboard; a typo'd address
-  // should error rather than silently create a new (RLS-blocked) account.
+  // Invite-only: shouldCreateUser:true so an approved (allow-listed) email creates an
+  // account on first login; the DB allow-list trigger rejects anyone not pre-approved.
   const { error } = await sb.auth.signInWithOtp({
-    email, options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: false },
+    email, options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: true },
   });
   $("send-link").disabled = false;
   if (!error) {
     msg.innerHTML = '<span class="ok">Link sent — check your inbox and spam. It expires in 1 hour and works once.</span>';
     return;
   }
-  // Friendlier mapping for the common cases.
+  // Friendlier mapping. The allow-list trigger surfaces as a DB/signup error.
   let txt = error.message || "Could not send the link.";
-  if (/signups? not allowed|not authoriz/i.test(txt)) txt = "That email isn't a registered owner of this dashboard.";
+  if (/not approved|not allowed|database error|signups? not allowed|unexpected_failure/i.test(txt)) {
+    txt = "This email isn't approved for access yet. Ask the owner for an invite.";
+  }
   const wait = /after (\d+) seconds/i.exec(error.message || "");
   msg.innerHTML = `<span class="err">${esc(txt)}</span>`
     + (wait ? `<div class="dim" style="font-size:12px; margin-top:4px;">Too many requests — wait ${wait[1]}s and try again.</div>` : "");
 });
 $("logout").addEventListener("click", () => sb.auth.signOut());
+
+// ---------- one-time disclaimer (per user, stored in disclaimer_acks) ----------
+async function maybeShowDisclaimer() {
+  try {
+    const { data, error } = await sb.from("disclaimer_acks").select("user_id").limit(1);
+    if (!error && data && data.length) return;  // already acknowledged
+  } catch (e) { /* if the read fails, default to showing it */ }
+  $("disc-backdrop").classList.remove("hidden");
+  requestAnimationFrame(() => $("disc-backdrop").classList.add("show"));
+}
+async function acknowledgeDisclaimer() {
+  $("disc-ok").disabled = true;
+  try { await sb.from("disclaimer_acks").upsert({}, { onConflict: "user_id" }); } catch (e) { /* non-fatal */ }
+  $("disc-backdrop").classList.remove("show");
+  setTimeout(() => $("disc-backdrop").classList.add("hidden"), 180);
+  $("disc-ok").disabled = false;
+}
+
+// ---------- reusable delete confirmation ----------
+// Returns a Promise<boolean>. Used by EVERY delete action so nothing deletes on one click.
+function confirmDelete(message) {
+  return new Promise((resolve) => {
+    const bd = $("confirm-backdrop");
+    $("confirm-msg").textContent = message || "Are you sure you want to delete this? This can't be undone.";
+    bd.classList.remove("hidden");
+    requestAnimationFrame(() => bd.classList.add("show"));
+    const ok = $("confirm-ok"), cancel = $("confirm-cancel");
+    function done(val) {
+      bd.classList.remove("show");
+      setTimeout(() => bd.classList.add("hidden"), 180);
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      bd.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    }
+    const onOk = () => done(true), onCancel = () => done(false);
+    const onBackdrop = (e) => { if (e.target === bd) done(false); };
+    const onKey = (e) => { if (e.key === "Escape") done(false); };
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    bd.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+  });
+}
 
 // ---------- toast ----------
 let TOAST_TIMER = null;
@@ -633,6 +681,7 @@ async function loadTrades() {
         <button class="btn secondary small" data-del="${t.id}">Delete</button></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!(await confirmDelete())) return;
     await sb.from("paper_trades").delete().eq("id", b.dataset.del); showToast("Paper trade deleted."); loadTrades();
   }));
   list.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => closeTrade(b.dataset.close)));
@@ -780,7 +829,7 @@ async function sellPosition(id) {
 
 // Delete a holding; if a paper trade is linked, flag it (the link auto-nulls on delete).
 async function deletePosition(id) {
-  if (!confirm("Delete this holding entirely? (Use Sell instead to keep it for tax records.)")) return;
+  if (!(await confirmDelete("Are you sure you want to delete this holding? This can't be undone. (Use Sell instead to keep it for tax records.)"))) return;
   try {
     const { data: linked } = await sb.from("paper_trades").select("id,post_analysis").eq("position_id", id).limit(1);
     let flagged = false;
@@ -1017,7 +1066,8 @@ async function loadAlerts() {
           <button class="btn secondary small" data-del="${a.id}">Delete</button></span></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-    await sb.from("alerts").delete().eq("id", b.dataset.del); loadAlerts();
+    if (!(await confirmDelete())) return;
+    await sb.from("alerts").delete().eq("id", b.dataset.del); showToast("Alert deleted."); loadAlerts();
   }));
   list.querySelectorAll("[data-toggle]").forEach((b) => b.addEventListener("click", async () => {
     await sb.from("alerts").update({ is_active: b.dataset.on !== "1" }).eq("id", b.dataset.toggle); loadAlerts();
@@ -1168,7 +1218,13 @@ async function saveSettings() {
     const { error } = await sb.from("settings").upsert(rows, { onConflict: "key" });
     if (error) throw error;
     msg.innerHTML = '<span class="ok">Saved.</span>';
-  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  } catch (e) {
+    // settings is global engine config — only the owner can write (RLS). Explain cleanly.
+    const txt = /row-level security|policy/i.test(e.message || "")
+      ? "These are global engine settings — only the owner can change them."
+      : e.message;
+    msg.innerHTML = `<span class="err">${esc(txt)}</span>`;
+  }
 }
 
 init();
