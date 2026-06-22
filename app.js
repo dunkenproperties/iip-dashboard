@@ -609,7 +609,7 @@ async function loadTrades() {
     .select("id,asset_id,position_id,entry_price,stop_loss,target,conviction_at_entry,position_size_pct,entry_date,exit_price,exit_date,outcome,assets(symbol)")
     .order("entry_date", { ascending: false });
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
-  if (!data.length) { list.innerHTML = '<div class="card muted">No paper trades yet. Log your first above to start the track record.</div>'; return; }
+  if (!data.length) { list.innerHTML = '<div class="card muted">No paper trades yet. Add one using the form above — each trade then gets a one-click <b>Add to Portfolio</b> button (on its row) to promote it into a real holding.</div>'; return; }
   TRADES_BY_ID = {}; data.forEach((t) => (TRADES_BY_ID[t.id] = t));
   list.innerHTML = data.map((t) => {
     const a = t.assets || {};
@@ -716,7 +716,7 @@ async function loadPortfolio() {
     .select("id,asset_id,quantity,entry_price,entry_date,cost_basis,account_type,is_open,stop_loss,target,assets(symbol,name)")
     .eq("is_open", true).order("entry_date", { ascending: false });
   if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; summary.innerHTML = ""; return; }
-  if (!data.length) { summary.innerHTML = ""; list.innerHTML = '<div class="card muted">No holdings yet. Add one below.</div>'; return; }
+  if (!data.length) { summary.innerHTML = ""; list.innerHTML = '<div class="card muted">No holdings yet. Add one using the form below — each holding then gets a one-click <b>Log as Paper Trade</b> button (on its row). Or go to the <b>Trades</b> tab and tap <b>Add to Portfolio</b> on any paper trade to create the holding here.</div>'; return; }
   POSITIONS_BY_ID = {}; data.forEach((p) => (POSITIONS_BY_ID[p.id] = p));
   // which holdings are already linked to a paper trade (for the badge + dedup display)
   const linkedSet = new Set();
@@ -745,7 +745,7 @@ async function loadPortfolio() {
       <div class="muted" style="margin-top:8px; font-size:13px;">cost basis ${money(p.cost_basis)} · bought ${p.entry_date || "—"}</div>
       <div class="row wraprow" style="gap:6px; margin-top:8px;">
         <button class="btn secondary small" data-sell="${p.id}">Sell</button>
-        <button class="btn secondary small" data-logt="${p.id}">${linked ? "Update Trade" : "Log as Trade"}</button>
+        <button class="btn secondary small" data-logt="${p.id}">${linked ? "Update Paper Trade" : "Log as Paper Trade"}</button>
         <button class="btn secondary small" data-del="${p.id}">Delete</button></div></div>`;
   }).join("");
   list.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => deletePosition(b.dataset.del)));

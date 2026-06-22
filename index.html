@@ -225,7 +225,7 @@
 
     <!-- PORTFOLIO -->
     <section id="view-portfolio" class="hidden">
-      <div class="note"><b>Portfolio = what you actually hold</b> (real or paper). Add holdings with an <b>account type</b> (TFSA / RRSP / non-registered) for tax tracking. "Sell" records the exit so it flows into the Tax report. Tap <b>Log as Trade</b> to track one in the Trades tab too — the two stay linked in one click.</div>
+      <div class="note"><b>Portfolio = what you actually hold</b> (real or paper). Add holdings with an <b>account type</b> (TFSA / RRSP / non-registered) for tax tracking. "Sell" records the exit so it flows into the Tax report. Tap <b>Log as Paper Trade</b> to track one in the Trades tab too — the two stay linked in one click.</div>
       <div id="p-summary"></div>
       <div class="card">
         <div class="big" style="margin-bottom:6px;">Add holding</div>
@@ -308,7 +308,8 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="./config.js"></script>
-<script src="./app.js"></script>
+<!-- ?v= cache-buster: bump on every deploy so browsers never serve a stale app.js/config.js -->
+<script src="./config.js?v=20260622-2"></script>
+<script src="./app.js?v=20260622-2"></script>
 </body>
 </html>
