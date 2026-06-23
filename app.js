@@ -147,7 +147,9 @@ const TABS = ["candidates", "bitcoin", "analyzer", "frameworks", "social", "trad
 function activateTab(name) {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === name));
   TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
-  const map = { frameworks: renderFrameworks, social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
+  // candidates/bitcoin re-fetch on open too (not only at login), so a token-race or
+  // transient empty load self-heals when you revisit the tab.
+  const map = { candidates: loadAll, bitcoin: loadAll, frameworks: renderFrameworks, social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
   if (map[name]) map[name]();
   window.scrollTo(0, 0);
 }
@@ -156,8 +158,10 @@ $("refresh").addEventListener("click", loadAll);
 
 // ---------- shared data ----------
 async function latestScan() {
-  const { data, error } = await sb.from("scans").select("id,scan_timestamp,universe_slice")
-    .eq("status", "complete").order("scan_timestamp", { ascending: false }).limit(1);
+  // Most-recently-written completed scan. Order by created_at (write time) so a clock
+  // skew on scan_timestamp can't hide today's scan behind an older one.
+  const { data, error } = await sb.from("scans").select("id,scan_timestamp,universe_slice,created_at")
+    .eq("status", "complete").order("created_at", { ascending: false }).limit(1);
   if (error) throw error;
   return data && data[0];
 }
@@ -171,21 +175,29 @@ async function findOrCreateAsset(symbol) {
 }
 
 async function loadAll() {
+  let scan = null;
   try {
-    const scan = await latestScan();
-    await Promise.all([loadCandidates(scan), loadBitcoin(scan)]);
-  } catch (e) { $("cand-list").innerHTML = `<div class="card err">Error: ${esc(e.message)}</div>`; }
+    scan = await latestScan();
+  } catch (e) {
+    const err = `<div class="card err">Couldn't load the latest scan: ${esc(e.message)}</div>`;
+    $("cand-list").innerHTML = err; $("btc").innerHTML = err;
+    return;
+  }
+  // Independent on purpose: a failure in one must never blank the other.
+  loadCandidates(scan);
+  loadBitcoin(scan);
 }
 
 // ---------- Candidates ----------
 async function loadCandidates(scan) {
   const meta = $("cand-meta"), list = $("cand-list");
+  try {
   if (!scan) { meta.textContent = "No scans yet"; list.innerHTML = '<div class="card muted">Run a scan to see candidates.</div>'; return; }
   meta.textContent = `Latest scan · ${new Date(scan.scan_timestamp).toLocaleString()} · ${scan.universe_slice}`;
   const { data, error } = await sb.from("recommendations")
     .select("conviction,action,entry_target,stop_loss,exit_target,position_size_pct,rationale,assets(symbol,name,sector)")
     .eq("scan_id", scan.id).order("conviction", { ascending: false });
-  if (error) { list.innerHTML = `<div class="card err">${esc(error.message)}</div>`; return; }
+  if (error) throw error;
   if (!data.length) { list.innerHTML = '<div class="card muted">No recommendations in the latest scan.</div>'; return; }
   list.innerHTML = data.map((r, i) => {
     const a = r.assets || {}, c = Number(r.conviction);
@@ -218,11 +230,15 @@ async function loadCandidates(scan) {
         <div class="stat"><div class="k">Long-term</div><div class="v" style="color:var(--green)">${money(t3)} <span class="dim" style="font-size:12px;">+40%</span></div></div></div>
     </div>`;
   }).join("");
+  } catch (e) {
+    list.innerHTML = `<div class="card err">Couldn't load candidates: ${esc(e.message)}</div>`;
+  }
 }
 
 // ---------- Bitcoin ----------
 async function loadBitcoin(scan) {
   const box = $("btc"); let snap = null;
+  try {
   if (scan) { const { data } = await sb.from("bitcoin_snapshots").select("*").eq("scan_id", scan.id).limit(1); snap = data && data[0]; }
   if (!snap) { const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1); snap = data && data[0]; }
   if (!snap) { box.innerHTML = '<div class="card muted">No Bitcoin snapshot yet.</div>'; return; }
@@ -262,6 +278,9 @@ async function loadBitcoin(scan) {
       <div class="fieldtip" style="margin-top:8px;">${esc(snap.cycle_phase)}</div></div>
     ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:4px;">SIGNAL BREAKDOWN</div>
       <div class="fieldtip" style="margin-bottom:12px;">Each driver scored 0–10 (higher = more bullish for Bitcoin):</div>${compRows}</div>` : ""}`;
+  } catch (e) {
+    box.innerHTML = `<div class="card err">Couldn't load the Bitcoin read: ${esc(e.message)}</div>`;
+  }
 }
 
 // ====================================================================
