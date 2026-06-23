@@ -7,7 +7,7 @@ const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
 const $ = (id) => document.getElementById(id);
 
 const OWNER_EMAIL = "dunkenproperties@gmail.com";
-let CURRENT_EMAIL = null;
+let CURRENT_EMAIL = null, CURRENT_UID = null;
 const isOwner = () => (CURRENT_EMAIL || "").toLowerCase() === OWNER_EMAIL;
 const DEFAULT_DEEP_LIMIT = 15;  // fallback if settings.deep_analysis_monthly_limit is unset
 
@@ -54,6 +54,7 @@ async function init() {
 function showAuth(session) {
   const authed = !!session;
   CURRENT_EMAIL = authed ? (session.user.email || null) : null;
+  CURRENT_UID = authed ? (session.user.id || null) : null;
   $("login").classList.toggle("hidden", authed);
   $("app").classList.toggle("hidden", !authed);
   $("hdr-right").textContent = authed ? (session.user.email || "") : "";
@@ -1305,7 +1306,6 @@ async function loadSettings() {
   SETTINGS_CACHE = {}; data.forEach((r) => (SETTINGS_CACHE[r.key] = r.value));
   const g = (k, d) => (SETTINGS_CACHE[k] !== undefined ? SETTINGS_CACHE[k] : d);
   const freqs = g("scan_frequencies", {});
-  const channels = g("alert_channels", {});
 
   // Claude API spend this month (spec §2.8 — cost visible in the dashboard)
   const cap = Number(g("monthly_budget_cap", 25));
@@ -1342,7 +1342,31 @@ async function loadSettings() {
   const freqSel = (src) => `<div><label class="fld">${src[0].toUpperCase() + src.slice(1)}</label>
     <select data-freq="${src}">${FREQ.map((f) => `<option ${freqs[src] === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
 
+  // Per-user notification settings (everyone has their own; RLS scopes to this user).
+  let myNotif = {};
+  try {
+    const { data: nrows } = await sb.from("user_notifications").select("email,phone,email_enabled,sms_enabled").limit(1);
+    if (nrows && nrows[0]) myNotif = nrows[0];
+  } catch (e) { /* row may not exist yet */ }
+  const nEmail = myNotif.email || CURRENT_EMAIL || "";
+  const nPhone = myNotif.phone || "";
+  const nEmailOn = !!myNotif.email_enabled, nSmsOn = !!myNotif.sms_enabled;
+
   body.innerHTML = `
+    <div class="card" style="border-color:var(--teal);">
+      <div class="big" style="margin-bottom:6px;">Your notifications</div>
+      <div class="fieldtip" style="margin-bottom:8px;">Where <b>your</b> alerts go. Each alert rule (Alerts tab) is sent by email or SMS — these are your delivery details and master on/off switches. Stored privately to you.</div>
+      <div class="grid2">
+        <div><label class="fld">Notification email</label><input id="notif-email" type="email" value="${esc(nEmail)}" /></div>
+        <div><label class="fld">Mobile number (SMS)</label><input id="notif-phone" type="tel" value="${esc(nPhone)}" placeholder="+1 416 555 1234" /></div>
+        <div><label class="fld">Email alerts</label><select id="notif-email-on"><option value="false" ${!nEmailOn ? "selected" : ""}>Off</option><option value="true" ${nEmailOn ? "selected" : ""}>On</option></select></div>
+        <div><label class="fld">SMS alerts</label><select id="notif-sms-on"><option value="false" ${!nSmsOn ? "selected" : ""}>Off</option><option value="true" ${nSmsOn ? "selected" : ""}>On</option></select></div>
+      </div>
+      <div class="fieldtip" style="margin-top:6px;">No phone? Leave it blank — SMS rules just skip for you; email still works.</div>
+      <div style="height:10px;"></div>
+      <button id="notif-save" class="btn" style="width:100%;">Save notifications</button>
+      <div id="notif-msg" class="center" style="font-size:14px; margin-top:8px;"></div>
+    </div>
     <div class="card">
       <div class="big" style="margin-bottom:6px;">Scan frequency</div>
       <div class="muted" style="margin-bottom:8px;">How often each free data source is scanned.</div>
@@ -1381,13 +1405,6 @@ async function loadSettings() {
       <button id="set-deep" class="btn" ${deepDisabled ? "disabled" : ""} style="width:100%;">Run Deep Analysis now</button>
       <div id="set-deep-msg" class="fieldtip" style="margin-top:8px;">${!claudeOn ? "Turn Claude API ON above and save, then this button activates." : ""}</div>
     </div>
-    <div class="card">
-      <div class="big" style="margin-bottom:6px;">Alerts</div>
-      <div class="grid2">
-        <div><label class="fld">Email alerts</label><select id="set-email"><option value="false" ${!channels.email_enabled ? "selected" : ""}>Off</option><option value="true" ${channels.email_enabled ? "selected" : ""}>On</option></select></div>
-        <div><label class="fld">SMS alerts</label><select id="set-sms"><option value="false" ${!channels.sms_enabled ? "selected" : ""}>Off</option><option value="true" ${channels.sms_enabled ? "selected" : ""}>On</option></select></div>
-      </div>
-    </div>
     <button id="set-save" class="btn" style="width:100%;">Save settings</button>
     <div id="set-msg" class="center" style="font-size:14px; margin:10px 0;"></div>
     <div class="card" style="margin-top:12px;">
@@ -1396,8 +1413,41 @@ async function loadSettings() {
     </div>`;
 
   $("set-save").addEventListener("click", saveSettings);
+  $("notif-save").addEventListener("click", saveNotifications);
   const deep = $("set-deep");
   if (deep) deep.addEventListener("click", runDeepAnalysis);
+}
+
+// Phone -> E.164 (Twilio needs it). Best-effort for North American numbers.
+function normalizePhone(v) {
+  const s = String(v || "").trim();
+  if (!s) return null;
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+  if (s[0] === "+") return "+" + digits;
+  if (digits.length === 10) return "+1" + digits;
+  if (digits.length === 11 && digits[0] === "1") return "+" + digits;
+  return "+" + digits;
+}
+
+async function saveNotifications() {
+  const msg = $("notif-msg");
+  try {
+    msg.textContent = "Saving…";
+    const row = {
+      user_id: CURRENT_UID,
+      email: $("notif-email").value.trim() || null,
+      phone: normalizePhone($("notif-phone").value),
+      email_enabled: $("notif-email-on").value === "true",
+      sms_enabled: $("notif-sms-on").value === "true",
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await sb.from("user_notifications").upsert(row, { onConflict: "user_id" });
+    if (error) throw error;
+    if (row.phone) $("notif-phone").value = row.phone;  // show the normalized form
+    msg.innerHTML = '<span class="ok">Saved.</span>';
+    showToast("Notification settings saved.");
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
 // Record one deep-analysis run against the user's monthly allowance, then refresh the
@@ -1437,9 +1487,6 @@ async function saveSettings() {
     msg.textContent = "Saving…";
     const freqs = {};
     document.querySelectorAll("[data-freq]").forEach((s) => (freqs[s.dataset.freq] = s.value));
-    const channels = Object.assign({}, SETTINGS_CACHE.alert_channels || {}, {
-      email_enabled: $("set-email").value === "true", sms_enabled: $("set-sms").value === "true",
-    });
     const rows = [
       { key: "scan_frequencies", value: freqs },
       { key: "default_universe_slice", value: $("set-slice").value },
@@ -1447,7 +1494,6 @@ async function saveSettings() {
       { key: "claude_model", value: $("set-model").value },
       { key: "monthly_budget_cap", value: parseFloat($("set-cap").value) || 0 },
       { key: "budget_alert_threshold_pct", value: parseFloat($("set-alertpct").value) || 0 },
-      { key: "alert_channels", value: channels },
     ];
     const { error } = await sb.from("settings").upsert(rows, { onConflict: "key" });
     if (error) throw error;
