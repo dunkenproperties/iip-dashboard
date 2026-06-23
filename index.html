@@ -260,6 +260,13 @@
         <button id="p-add" class="btn" style="width:100%;">Add holding</button>
         <div id="p-msg" class="center" style="font-size:14px; margin-top:10px;"></div>
       </div>
+      <div class="card">
+        <div class="big" style="margin-bottom:6px;">Import portfolio (CSV)</div>
+        <div class="fieldtip" style="margin-bottom:10px;">Upload a CSV exported from your brokerage (Questrade, Wealthsimple, IBKR, Scotia iTRADE, Robinhood, Fidelity…). You'll map the columns and preview everything before anything is saved. Imports into <b>your</b> portfolio only.</div>
+        <input id="p-import-file" type="file" accept=".csv,text/csv" class="hidden" />
+        <button id="p-import-btn" class="btn secondary" style="width:100%;">Choose CSV file…</button>
+        <div id="p-import-panel" class="hidden" style="margin-top:12px;"></div>
+      </div>
       <div id="p-list"><div class="spinner">Loading…</div></div>
     </section>
 
@@ -350,7 +357,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!-- ?v= cache-buster: bump on every deploy so browsers never serve a stale app.js/config.js -->
-<script src="./config.js?v=20260622-3"></script>
-<script src="./app.js?v=20260622-3"></script>
+<script src="./config.js?v=20260623-1"></script>
+<script src="./app.js?v=20260623-1"></script>
 </body>
 </html>

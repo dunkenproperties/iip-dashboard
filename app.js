@@ -6,6 +6,11 @@ const cfg = window.IIP_CONFIG;
 const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
 const $ = (id) => document.getElementById(id);
 
+const OWNER_EMAIL = "dunkenproperties@gmail.com";
+let CURRENT_EMAIL = null;
+const isOwner = () => (CURRENT_EMAIL || "").toLowerCase() === OWNER_EMAIL;
+const DEFAULT_DEEP_LIMIT = 15;  // fallback if settings.deep_analysis_monthly_limit is unset
+
 // ---------- format helpers ----------
 const money = (v) => (v == null || v === "" ? "—" : "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
 const num = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
@@ -43,9 +48,12 @@ async function init() {
   $("al-type").addEventListener("change", alertRuleUI);
   $("al-add").addEventListener("click", addAlert);
   $("disc-ok").addEventListener("click", acknowledgeDisclaimer);
+  $("p-import-btn").addEventListener("click", () => $("p-import-file").click());
+  $("p-import-file").addEventListener("change", handleImportFile);
 }
 function showAuth(session) {
   const authed = !!session;
+  CURRENT_EMAIL = authed ? (session.user.email || null) : null;
   $("login").classList.toggle("hidden", authed);
   $("app").classList.toggle("hidden", !authed);
   $("hdr-right").textContent = authed ? (session.user.email || "") : "";
@@ -884,6 +892,183 @@ $("p-add").addEventListener("click", async () => {
 });
 
 // ====================================================================
+// CSV PORTFOLIO IMPORT — broker-agnostic, writes to the user's own portfolio only.
+// Flow: pick file -> map columns (auto-guessed) -> preview -> confirm -> insert/merge.
+// ====================================================================
+let IMPORT_HEADERS = [], IMPORT_DATA = [];
+
+// Minimal RFC-4180-ish CSV parser (handles quoted fields, escaped quotes, CRLF).
+function parseCSV(text) {
+  text = String(text).replace(/^﻿/, "");  // strip UTF-8 BOM if present
+  const rows = []; let row = [], field = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ',') { row.push(field); field = ""; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c !== '\r') field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+}
+
+// Common broker header variants -> our four fields.
+const HEADER_HINTS = {
+  ticker: ["symbol", "ticker", "stock", "security", "instrument", "sym", "symbolname"],
+  qty:    ["quantity", "qty", "shares", "units", "numberofshares", "sharesheld", "shareqty", "position"],
+  price:  ["averagecost", "avgcost", "averageprice", "avgprice", "purchaseprice", "costpershare", "unitcost", "bookcostpershare", "acb", "avgpricepaid", "price", "cost"],
+  date:   ["purchasedate", "tradedate", "dateacquired", "acquired", "settlementdate", "opendate", "transactiondate", "date"],
+};
+const normH = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+function guessCol(headers, hints) {
+  const nh = headers.map(normH);
+  for (const hint of hints) { const i = nh.indexOf(hint); if (i >= 0) return i; }       // exact
+  for (let i = 0; i < nh.length; i++) for (const hint of hints) if (nh[i] && nh[i].includes(hint)) return i; // contains
+  return -1;
+}
+const cleanNum = (v) => Number(String(v == null ? "" : v).replace(/[$,\s]/g, ""));
+function cleanDate(v) {
+  const s = String(v || "").trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);  // unparseable -> blank (allowed)
+}
+const validTicker = (t) => /^[A-Za-z][A-Za-z0-9.\-]{0,11}$/.test(String(t || "").trim());
+
+async function handleImportFile(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";  // allow re-selecting the same file later
+  if (!file) return;
+  let text;
+  try { text = await file.text(); } catch (err) { showToast("Couldn't read that file.", "warn"); return; }
+  const rows = parseCSV(text);
+  if (rows.length < 2) { showToast("That CSV has a header but no data rows.", "warn"); return; }
+  IMPORT_HEADERS = rows[0].map((h) => String(h).trim());
+  IMPORT_DATA = rows.slice(1);
+  renderImportMapper();
+}
+
+function renderImportMapper() {
+  const panel = $("p-import-panel");
+  const opts = (sel, allowNone) =>
+    (allowNone ? `<option value="-1">— none —</option>` : "") +
+    IMPORT_HEADERS.map((h, i) => `<option value="${i}" ${i === sel ? "selected" : ""}>${esc(h || "(column " + (i + 1) + ")")}</option>`).join("");
+  const gT = guessCol(IMPORT_HEADERS, HEADER_HINTS.ticker);
+  const gQ = guessCol(IMPORT_HEADERS, HEADER_HINTS.qty);
+  const gP = guessCol(IMPORT_HEADERS, HEADER_HINTS.price);
+  const gD = guessCol(IMPORT_HEADERS, HEADER_HINTS.date);
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div class="fieldtip" style="margin-bottom:8px;">Found <b>${IMPORT_DATA.length}</b> row${IMPORT_DATA.length === 1 ? "" : "s"} across ${IMPORT_HEADERS.length} columns. Map them (we guessed where we could), then preview:</div>
+    <div class="grid2">
+      <div><label class="fld">Ticker *</label><select id="imp-ticker">${opts(gT, false)}</select></div>
+      <div><label class="fld">Quantity *</label><select id="imp-qty">${opts(gQ, false)}</select></div>
+      <div><label class="fld">Average / buy price *</label><select id="imp-price">${opts(gP, false)}</select></div>
+      <div><label class="fld">Purchase date (optional)</label><select id="imp-date">${opts(gD, true)}</select></div>
+      <div><label class="fld">Import into account</label>
+        <select id="imp-acct"><option value="non_registered">Non-registered</option><option value="tfsa">TFSA</option><option value="rrsp">RRSP</option><option value="paper">Paper</option></select></div>
+      <div><label class="fld">If a ticker already exists</label>
+        <select id="imp-dup"><option value="merge">Merge (update avg cost &amp; qty)</option><option value="separate">Add as a separate holding</option></select></div>
+    </div>
+    <div id="imp-preview" style="margin-top:12px;"></div>
+    <div class="row wraprow" style="gap:8px; margin-top:12px;">
+      <button id="imp-cancel" class="btn secondary small" style="flex:1; min-width:120px;">Cancel</button>
+      <button id="imp-commit" class="btn small" style="flex:2; min-width:160px;">Import to my portfolio</button>
+    </div>
+    <div id="imp-msg" class="center" style="font-size:14px; margin-top:10px;"></div>`;
+  ["imp-ticker", "imp-qty", "imp-price", "imp-date"].forEach((id) => $(id).addEventListener("change", renderImportPreview));
+  $("imp-cancel").addEventListener("click", () => { panel.classList.add("hidden"); panel.innerHTML = ""; });
+  $("imp-commit").addEventListener("click", commitImport);
+  renderImportPreview();
+}
+
+// Parse every data row against the current column mapping. Bad rows are flagged, not fatal.
+function parseImportRows() {
+  const tC = +$("imp-ticker").value, qC = +$("imp-qty").value, pC = +$("imp-price").value, dC = +$("imp-date").value;
+  const valid = [], skipped = [];
+  IMPORT_DATA.forEach((r, idx) => {
+    const ticker = String(r[tC] == null ? "" : r[tC]).trim().toUpperCase();
+    const qty = cleanNum(r[qC]);
+    const price = cleanNum(r[pC]);
+    const date = dC >= 0 ? cleanDate(r[dC]) : null;
+    let reason = "";
+    if (!validTicker(ticker)) reason = "bad ticker";
+    else if (!isFinite(qty) || qty <= 0) reason = "bad quantity";
+    else if (!isFinite(price) || price <= 0) reason = "bad price";
+    if (reason) skipped.push({ line: idx + 2, ticker: ticker || "(blank)", reason });
+    else valid.push({ ticker, qty, price, date });
+  });
+  return { valid, skipped };
+}
+
+function renderImportPreview() {
+  const { valid, skipped } = parseImportRows();
+  const head = `<tr><th class="l">Ticker</th><th>Qty</th><th>Avg price</th><th>Date</th><th class="l">Status</th></tr>`;
+  const show = [];
+  valid.slice(0, 40).forEach((v) => show.push(`<tr><td class="l">${esc(v.ticker)}</td><td>${num(v.qty, 2)}</td><td>${money(v.price)}</td><td>${v.date || "—"}</td><td class="l" style="color:var(--green)">OK</td></tr>`));
+  skipped.slice(0, 40).forEach((s) => show.push(`<tr><td class="l">${esc(s.ticker)}</td><td>—</td><td>—</td><td>—</td><td class="l" style="color:var(--red)">skip · ${esc(s.reason)} (line ${s.line})</td></tr>`));
+  $("imp-preview").innerHTML = `
+    <div class="fieldtip" style="margin-bottom:6px;"><b style="color:var(--green)">${valid.length} ready</b> · <b style="color:${skipped.length ? "var(--red)" : "var(--dim)"}">${skipped.length} skipped</b></div>
+    <div class="scrollx"><table class="tax">${head}${show.join("")}</table></div>`;
+}
+
+async function commitImport() {
+  const msg = $("imp-msg"), btn = $("imp-commit");
+  const { valid, skipped } = parseImportRows();
+  if (!valid.length) { msg.innerHTML = '<span class="err">No valid rows to import.</span>'; return; }
+  const acct = $("imp-acct").value, mode = $("imp-dup").value;
+  btn.disabled = true; msg.textContent = "Importing…";
+  // Merge mode: first fold duplicate tickers within the file itself (so it can't dup-stack),
+  // then merge into any existing open holding for that ticker.
+  let toWrite = valid;
+  if (mode === "merge") {
+    const byT = {};
+    valid.forEach((v) => {
+      const g = byT[v.ticker] || (byT[v.ticker] = { ticker: v.ticker, qty: 0, cost: 0, date: null });
+      g.qty += v.qty; g.cost += v.qty * v.price; g.date = g.date || v.date;
+    });
+    toWrite = Object.values(byT).map((g) => ({ ticker: g.ticker, qty: g.qty, price: g.cost / g.qty, date: g.date }));
+  }
+  let added = 0, merged = 0, failed = 0;
+  for (const row of toWrite) {
+    try {
+      const asset_id = await findOrCreateAsset(row.ticker);
+      let existing = null;
+      if (mode === "merge") {
+        const { data } = await sb.from("positions").select("id,quantity,entry_price").eq("asset_id", asset_id).eq("is_open", true).limit(1);
+        existing = data && data[0];  // RLS already scopes this to the current user
+      }
+      if (existing) {
+        const oldQ = Number(existing.quantity) || 0, oldP = Number(existing.entry_price) || 0;
+        const newQ = oldQ + row.qty;
+        const newAvg = newQ ? (oldQ * oldP + row.qty * row.price) / newQ : row.price;
+        const { error } = await sb.from("positions").update({ quantity: newQ, entry_price: newAvg, cost_basis: newAvg * newQ }).eq("id", existing.id);
+        if (error) throw error;
+        merged++;
+      } else {
+        const { error } = await sb.from("positions").insert({
+          asset_id, quantity: row.qty, entry_price: row.price, cost_basis: row.price * row.qty,
+          account_type: acct, entry_date: row.date || null, is_open: true,
+        });
+        if (error) throw error;
+        added++;
+      }
+    } catch (e) { failed++; }
+  }
+  const parts = [];
+  if (added) parts.push(`${added} added`);
+  if (merged) parts.push(`${merged} merged`);
+  if (skipped.length) parts.push(`${skipped.length} skipped`);
+  if (failed) parts.push(`${failed} failed`);
+  showToast("Import done — " + (parts.join(", ") || "nothing to do") + ".");
+  $("p-import-panel").classList.add("hidden"); $("p-import-panel").innerHTML = "";
+  loadPortfolio();
+}
+
+// ====================================================================
 // SCORECARD (framework_scores aggregated)
 // ====================================================================
 async function loadScorecard() {
@@ -1134,6 +1319,26 @@ async function loadSettings() {
   const pctUsed = cap ? Math.min(100, (spent / cap) * 100) : 0;
   const spendColor = pctUsed >= 100 ? "var(--red)" : pctUsed >= Number(g("budget_alert_threshold_pct", 75)) ? "var(--yellow)" : "var(--green)";
 
+  // Per-user deep-analysis allowance (owner = unlimited). RLS scopes the count to this user.
+  const owner = isOwner();
+  const deepLimit = Number(g("deep_analysis_monthly_limit", DEFAULT_DEEP_LIMIT));
+  let deepUsed = 0;
+  try {
+    const { count } = await sb.from("deep_analysis_runs").select("id", { count: "exact", head: true }).gte("created_at", monthStart.toISOString());
+    deepUsed = count || 0;
+  } catch (e) { /* table readable once logged in */ }
+  const deepLeft = Math.max(0, deepLimit - deepUsed);
+  const resetDate = new Date(monthStart); resetDate.setUTCMonth(resetDate.getUTCMonth() + 1);
+  const resetStr = resetDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  const claudeOn = !!g("claude_api_enabled");
+  const deepBlocked = !owner && deepLeft <= 0;
+  const deepDisabled = !claudeOn || deepBlocked;
+  const deepCounter = owner
+    ? `<div class="fieldtip" style="margin-bottom:10px;"><b style="color:var(--teal)">Owner — unlimited.</b> Your runs are still logged.</div>`
+    : deepBlocked
+      ? `<div class="fieldtip" style="margin-bottom:10px;"><b style="color:var(--red)">You've used your ${deepLimit} for this month.</b> Resets ${esc(resetStr)}.</div>`
+      : `<div class="fieldtip" style="margin-bottom:10px;"><b style="color:${deepLeft <= 3 ? "var(--yellow)" : "var(--green)"}">${deepLeft} of ${deepLimit} deep analyses left this month.</b> Resets ${esc(resetStr)}.</div>`;
+
   const freqSel = (src) => `<div><label class="fld">${src[0].toUpperCase() + src.slice(1)}</label>
     <select data-freq="${src}">${FREQ.map((f) => `<option ${freqs[src] === f ? "selected" : ""}>${f}</option>`).join("")}</select></div>`;
 
@@ -1172,8 +1377,9 @@ async function loadSettings() {
     <div class="card">
       <div class="big" style="margin-bottom:6px;">Run Deep Analysis <span class="dim" style="font-size:13px;">(uses Claude API — metered)</span></div>
       <div class="fieldtip" style="margin-bottom:10px;">Runs the 4 qualitative frameworks (Wood, Thiel, Shiller, Camillo) on the latest scan's top candidates using the Claude API. It's <b>off by default</b> and never runs automatically — it only spends when you start it, and it stops at your cap.</div>
-      <button id="set-deep" class="btn" ${g("claude_api_enabled") ? "" : "disabled"} style="width:100%;">Run Deep Analysis now</button>
-      <div id="set-deep-msg" class="fieldtip" style="margin-top:8px;">${g("claude_api_enabled") ? "" : "Turn Claude API ON above and save, then this button activates."}</div>
+      ${deepCounter}
+      <button id="set-deep" class="btn" ${deepDisabled ? "disabled" : ""} style="width:100%;">Run Deep Analysis now</button>
+      <div id="set-deep-msg" class="fieldtip" style="margin-top:8px;">${!claudeOn ? "Turn Claude API ON above and save, then this button activates." : ""}</div>
     </div>
     <div class="card">
       <div class="big" style="margin-bottom:6px;">Alerts</div>
@@ -1191,11 +1397,39 @@ async function loadSettings() {
 
   $("set-save").addEventListener("click", saveSettings);
   const deep = $("set-deep");
-  if (deep) deep.addEventListener("click", () => {
-    $("set-deep-msg").innerHTML = "Deep analysis runs in the engine (where the Claude key lives), not from this page. "
-      + "It runs on demand via <code>python -m engine.run_qualitative</code>, and on-demand triggering from this button "
-      + "turns on once the scan engine is deployed. Your budget cap and the alert threshold apply automatically.";
-  });
+  if (deep) deep.addEventListener("click", runDeepAnalysis);
+}
+
+// Record one deep-analysis run against the user's monthly allowance, then refresh the
+// counter. Owner is unlimited. The actual Claude run happens in the engine (where the key
+// lives); this meters + logs the request per user and is the per-user audit trail.
+async function runDeepAnalysis() {
+  const msg = $("set-deep-msg");
+  const btn = $("set-deep");
+  btn.disabled = true;
+  try {
+    const monthStart = new Date(); monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
+    if (!isOwner()) {
+      // Re-check the limit server-side to avoid a stale-count race.
+      const limit = Number((SETTINGS_CACHE.deep_analysis_monthly_limit ?? DEFAULT_DEEP_LIMIT));
+      const { count } = await sb.from("deep_analysis_runs").select("id", { count: "exact", head: true }).gte("created_at", monthStart.toISOString());
+      if ((count || 0) >= limit) {
+        msg.innerHTML = `<span class="err">You've used your ${limit} deep analyses for this month.</span>`;
+        loadSettings();
+        return;
+      }
+    }
+    const model = SETTINGS_CACHE.claude_model || DEFAULT_MODEL;
+    const { error } = await sb.from("deep_analysis_runs").insert({ model, note: "requested from dashboard" });
+    if (error) throw error;
+    showToast("Deep analysis requested — recorded against your monthly allowance.");
+    msg.innerHTML = "Requested. The analysis runs in the engine (where the Claude key lives) on its next cycle; "
+      + "the global monthly budget cap still applies as the final backstop.";
+    loadSettings();  // refresh the counter
+  } catch (e) {
+    btn.disabled = false;
+    msg.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
 }
 async function saveSettings() {
   const msg = $("set-msg");
