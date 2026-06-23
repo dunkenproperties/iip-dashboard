@@ -188,16 +188,34 @@ async function loadAll() {
   loadBitcoin(scan);
 }
 
+// Plain-English funnel line: real counts at each gate, pulled from gate_scores.
+// gate_scores is shared (read_all), so no per-user filter applies.
+async function renderFunnel(scanId, showing) {
+  const el = $("cand-funnel");
+  try {
+    const q = (gate, passed) => {
+      let c = sb.from("gate_scores").select("id", { count: "exact", head: true }).eq("scan_id", scanId).eq("gate", gate);
+      return passed ? c.eq("passed", true) : c;
+    };
+    const [scanned, p1, p2, p3] = await Promise.all([q(1, false), q(1, true), q(2, true), q(3, true)]);
+    const n = (r) => (r && r.count) || 0;
+    el.textContent = `Scanned ${n(scanned)} stocks · ${n(p1)} passed Gate 1 (liquidity) · ${n(p2)} passed Gate 2 (quant score, top 20%) · ${n(p3)} passed Gate 3 (frameworks). Showing the ${showing} candidate${showing === 1 ? "" : "s"} that cleared the gates, ranked by conviction.`;
+  } catch (e) {
+    el.textContent = "";  // never let the funnel break the tab
+  }
+}
+
 // ---------- Candidates ----------
 async function loadCandidates(scan) {
   const meta = $("cand-meta"), list = $("cand-list");
   try {
-  if (!scan) { meta.textContent = "No scans yet"; list.innerHTML = '<div class="card muted">Run a scan to see candidates.</div>'; return; }
+  if (!scan) { meta.textContent = "No scans yet"; $("cand-funnel").textContent = "No scans yet — run a scan to see the gate funnel."; list.innerHTML = '<div class="card muted">Run a scan to see candidates.</div>'; return; }
   meta.textContent = `Latest scan · ${new Date(scan.scan_timestamp).toLocaleString()} · ${scan.universe_slice}`;
   const { data, error } = await sb.from("recommendations")
     .select("conviction,action,entry_target,stop_loss,exit_target,position_size_pct,rationale,assets(symbol,name,sector)")
     .eq("scan_id", scan.id).order("conviction", { ascending: false });
   if (error) throw error;
+  renderFunnel(scan.id, data.length);  // plain-English gate funnel from real scan counts
   if (!data.length) { list.innerHTML = '<div class="card muted">No recommendations in the latest scan.</div>'; return; }
   list.innerHTML = data.map((r, i) => {
     const a = r.assets || {}, c = Number(r.conviction);
