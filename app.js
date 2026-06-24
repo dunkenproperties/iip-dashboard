@@ -217,7 +217,9 @@ const UNIVERSES = [
 let CURRENT_UNIVERSE = null;
 const uniByKey = (k) => UNIVERSES.find((u) => u.key === k);
 function universeForSlice(slice) { const u = slice && UNIVERSES.find((x) => x.slices.includes(slice)); return u ? u.key : null; }
-function estRuntime(n) { const s = Math.round((n || 1) * 2.2); return `~${Math.max(1, Math.round(s / 60))} min`; }
+// Wall-clock ≈ ~5 min fixed overhead (social + bitcoin steps) + ~2s/ticker fetch.
+// Measured: dow30(30)=~7min, full(503)=~18min.
+function estRuntime(n) { const s = 300 + (n || 1) * 2; return `~${Math.max(5, Math.round(s / 60))} min`; }
 
 function buildUniversePicker() {
   const row = $("uni-picker");
