@@ -50,6 +50,8 @@ async function init() {
   $("disc-ok").addEventListener("click", acknowledgeDisclaimer);
   $("p-import-btn").addEventListener("click", () => $("p-import-file").click());
   $("p-import-file").addEventListener("change", handleImportFile);
+  $("wl-save").addEventListener("click", saveWatchlist);
+  $("wl-run").addEventListener("click", runWatchlist);
 }
 function showAuth(session) {
   const authed = !!session;
@@ -103,12 +105,15 @@ async function acknowledgeDisclaimer() {
   $("disc-ok").disabled = false;
 }
 
-// ---------- reusable delete confirmation ----------
-// Returns a Promise<boolean>. Used by EVERY delete action so nothing deletes on one click.
-function confirmDelete(message) {
+// ---------- reusable confirmation modal ----------
+// Returns a Promise<boolean>. Used for deletes and for confirm-first scan runs.
+function confirmModal({ message, title = "Confirm", okText = "OK", danger = false }) {
   return new Promise((resolve) => {
     const bd = $("confirm-backdrop");
-    $("confirm-msg").textContent = message || "Are you sure you want to delete this? This can't be undone.";
+    $("confirm-title").textContent = title;
+    $("confirm-msg").textContent = message;
+    $("confirm-ok").textContent = okText;
+    $("confirm-ok").classList.toggle("danger", danger);
     bd.classList.remove("hidden");
     requestAnimationFrame(() => bd.classList.add("show"));
     const ok = $("confirm-ok"), cancel = $("confirm-cancel");
@@ -129,6 +134,11 @@ function confirmDelete(message) {
     bd.addEventListener("click", onBackdrop);
     document.addEventListener("keydown", onKey);
   });
+}
+// Nothing deletes on a single click.
+function confirmDelete(message) {
+  return confirmModal({ message: message || "Are you sure you want to delete this? This can't be undone.",
+    title: "Delete", okText: "Delete", danger: true });
 }
 
 // ---------- toast ----------
@@ -183,9 +193,113 @@ async function loadAll() {
     $("cand-list").innerHTML = err; $("btc").innerHTML = err;
     return;
   }
-  // Independent on purpose: a failure in one must never blank the other.
-  loadCandidates(scan);
-  loadBitcoin(scan);
+  buildUniversePicker();
+  loadBitcoin(scan);  // Bitcoin is global — tied to the latest overall scan, not the picker
+  if (!CURRENT_UNIVERSE) CURRENT_UNIVERSE = universeForSlice(scan && scan.universe_slice) || "sp500";
+  selectUniverse(CURRENT_UNIVERSE);  // drives the Candidates list + funnel for the chosen universe
+}
+
+// ====================================================================
+// UNIVERSE PICKER (Candidates tab) — choose which market to view/scan.
+// Each scan is tagged universe_slice; the picker maps a universe to its slice tags.
+// ====================================================================
+const UNIVERSES = [
+  { key: "sp500", label: "S&P 500", size: 503, run: "full", slices: ["full", "top100", "top50", "top25", "movers", "sector", "sp500"] },
+  { key: "sp400", label: "S&P 400", size: 400, run: "sp400", slices: ["sp400"] },
+  { key: "sp600", label: "S&P 600", size: 603, run: "sp600", slices: ["sp600"] },
+  { key: "nasdaq100", label: "Nasdaq-100", size: 101, run: "nasdaq100", slices: ["nasdaq100"] },
+  { key: "dow30", label: "Dow 30", size: 30, run: "dow30", slices: ["dow30"] },
+  { key: "tsx", label: "TSX", size: 219, run: "tsx", slices: ["tsx"] },
+  { key: "russell1000", label: "Russell 1000", size: 1000, run: "russell1000", slices: ["russell1000"], stub: true },
+  { key: "russell2000", label: "Russell 2000", size: 2000, run: "russell2000", slices: ["russell2000"], stub: true },
+  { key: "custom", label: "My watchlist", run: "custom", slices: ["custom"], custom: true },
+];
+let CURRENT_UNIVERSE = null;
+const uniByKey = (k) => UNIVERSES.find((u) => u.key === k);
+function universeForSlice(slice) { const u = slice && UNIVERSES.find((x) => x.slices.includes(slice)); return u ? u.key : null; }
+function estRuntime(n) { const s = Math.round((n || 1) * 2.2); return `~${Math.max(1, Math.round(s / 60))} min`; }
+
+function buildUniversePicker() {
+  const row = $("uni-picker");
+  row.innerHTML = UNIVERSES.map((u) => {
+    const sz = u.custom ? "" : u.stub ? `<span class="sz">soon</span>` : `<span class="sz">${u.size}</span>`;
+    return `<div class="uni-chip${u.key === CURRENT_UNIVERSE ? " active" : ""}${u.stub ? " stub" : ""}" data-uni="${u.key}">${esc(u.label)}${sz}</div>`;
+  }).join("");
+  row.querySelectorAll("[data-uni]").forEach((c) => c.addEventListener("click", () => {
+    const u = uniByKey(c.dataset.uni);
+    if (u.stub) { showToast(`${u.label} isn't available yet — no reliable free constituent source.`, "warn"); return; }
+    selectUniverse(c.dataset.uni);
+  }));
+}
+
+async function latestScanForUniverse(key) {
+  const u = uniByKey(key);
+  const { data } = await sb.from("scans").select("id,scan_timestamp,universe_slice,created_at")
+    .in("universe_slice", u.slices).eq("status", "complete").order("created_at", { ascending: false }).limit(1);
+  return data && data[0];
+}
+
+async function selectUniverse(key) {
+  CURRENT_UNIVERSE = key;
+  buildUniversePicker();
+  const u = uniByKey(key);
+  $("uni-custom").classList.toggle("hidden", !u.custom);
+  if (u.custom) loadWatchlist();
+  renderRunControls(u);
+  if (u.stub) {
+    $("cand-funnel").textContent = "";
+    $("cand-meta").textContent = `${u.label} — coming soon`;
+    $("cand-list").innerHTML = `<div class="card muted"><b>${esc(u.label)}</b> (~${u.size} names) isn't available yet — there's no reliable free constituent list (iShares blocks scripted downloads). Coming soon.</div>`;
+    return;
+  }
+  const scan = await latestScanForUniverse(key);
+  if (scan) { loadCandidates(scan); return; }
+  $("cand-funnel").textContent = "";
+  $("cand-meta").textContent = `${u.label} — no scan yet`;
+  $("cand-list").innerHTML = `<div class="card muted">No scan yet for <b>${esc(u.label)}</b>. ${u.custom ? "Add tickers above and tap <b>Scan my watchlist</b>." : `Tap <b>Run a fresh scan</b> below to queue one (${estRuntime(u.size)}).`}</div>`;
+}
+
+function renderRunControls(u) {
+  const box = $("uni-run");
+  if (u.custom || u.stub) { box.innerHTML = ""; return; }
+  box.innerHTML = `<button id="uni-run-btn" class="btn secondary small">↻ Run a fresh ${esc(u.label)} scan <span class="dim">(${estRuntime(u.size)})</span></button>`;
+  $("uni-run-btn").addEventListener("click", () => requestScan(u));
+}
+
+// Queue an on-demand scan request (fulfilled by the engine worker). Confirm-first,
+// with the expected runtime; large universes are flagged as best run scheduled.
+async function requestScan(u, customTickers) {
+  const count = customTickers ? customTickers.split(/[,\s]+/).filter(Boolean).length : u.size;
+  const sizeText = u.custom ? `${count} ticker${count === 1 ? "" : "s"}` : `${u.size} names`;
+  const mins = estRuntime(count);
+  const big = !u.custom && u.size >= 900;
+  const warn = big ? ` This is a large universe — best run as a scheduled scan (it can take ${mins}).` : "";
+  const ok = await confirmModal({ title: "Run scan", okText: "Run scan",
+    message: `Run a fresh ${u.label} scan? It scans ${sizeText} (${mins}) on the engine.${warn} The candidates appear here when it finishes.` });
+  if (!ok) return;
+  try {
+    const { error } = await sb.from("scan_requests").insert({ universe: u.run, custom_tickers: customTickers || null, status: "pending" });
+    if (error) throw error;
+    showToast("Scan requested — it'll run on the engine and appear here when done.");
+    $("cand-meta").textContent = `${u.label} — scan requested (${mins})…`;
+  } catch (e) { showToast(e.message, "warn"); }
+}
+
+async function loadWatchlist() {
+  try { const { data } = await sb.from("watchlists").select("tickers").limit(1); if (data && data[0]) $("wl-tickers").value = data[0].tickers || ""; } catch (e) { /* none yet */ }
+}
+async function saveWatchlist() {
+  try {
+    const { error } = await sb.from("watchlists").upsert({ user_id: CURRENT_UID, tickers: $("wl-tickers").value.trim(), updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) throw error;
+    $("wl-msg").innerHTML = '<span class="ok">Saved.</span>';
+  } catch (e) { $("wl-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+async function runWatchlist() {
+  const tickers = $("wl-tickers").value.trim().split(/[,\s]+/).filter(Boolean);
+  if (!tickers.length) { $("wl-msg").innerHTML = '<span class="err">Enter at least one ticker.</span>'; return; }
+  await saveWatchlist();
+  await requestScan(uniByKey("custom"), tickers.join(","));
 }
 
 // Plain-English funnel line: real counts at each gate, pulled from gate_scores.
@@ -210,7 +324,9 @@ async function loadCandidates(scan) {
   const meta = $("cand-meta"), list = $("cand-list");
   try {
   if (!scan) { meta.textContent = "No scans yet"; $("cand-funnel").textContent = "No scans yet — run a scan to see the gate funnel."; list.innerHTML = '<div class="card muted">Run a scan to see candidates.</div>'; return; }
-  meta.textContent = `Latest scan · ${new Date(scan.scan_timestamp).toLocaleString()} · ${scan.universe_slice}`;
+  const uniKey = universeForSlice(scan.universe_slice);
+  const uniLabel = uniKey ? uniByKey(uniKey).label : scan.universe_slice;
+  meta.textContent = `${uniLabel} · last scan ${new Date(scan.scan_timestamp).toLocaleString()} · ${scan.universe_slice}`;
   const { data, error } = await sb.from("recommendations")
     .select("conviction,action,entry_target,stop_loss,exit_target,position_size_pct,rationale,assets(symbol,name,sector)")
     .eq("scan_id", scan.id).order("conviction", { ascending: false });
