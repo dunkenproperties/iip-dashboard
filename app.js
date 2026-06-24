@@ -193,6 +193,7 @@ async function loadAll() {
     $("cand-list").innerHTML = err; $("btc").innerHTML = err;
     return;
   }
+  await loadImportedUniverses();  // which Russell lists have been imported (universe_lists)
   buildUniversePicker();
   loadBitcoin(scan);  // Bitcoin is global — tied to the latest overall scan, not the picker
   if (!CURRENT_UNIVERSE) CURRENT_UNIVERSE = universeForSlice(scan && scan.universe_slice) || "sp500";
@@ -210,11 +211,26 @@ const UNIVERSES = [
   { key: "nasdaq100", label: "Nasdaq-100", size: 101, run: "nasdaq100", slices: ["nasdaq100"] },
   { key: "dow30", label: "Dow 30", size: 30, run: "dow30", slices: ["dow30"] },
   { key: "tsx", label: "TSX", size: 219, run: "tsx", slices: ["tsx"] },
-  { key: "russell1000", label: "Russell 1000", size: 1000, run: "russell1000", slices: ["russell1000"], stub: true },
-  { key: "russell2000", label: "Russell 2000", size: 2000, run: "russell2000", slices: ["russell2000"], stub: true },
+  { key: "russell1000", label: "Russell 1000", size: 1000, run: "russell1000", slices: ["russell1000"], importable: true },
+  { key: "russell2000", label: "Russell 2000", size: 2000, run: "russell2000", slices: ["russell2000"], importable: true },
   { key: "custom", label: "My watchlist", run: "custom", slices: ["custom"], custom: true },
 ];
+// Stable iShares fund pages (not direct file URLs, which break) for the Russell import.
+const RUSSELL_LINKS = {
+  russell1000: "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf",
+  russell2000: "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf",
+};
 let CURRENT_UNIVERSE = null;
+let IMPORTED = {};  // {russell1000: {count, imported_at}, ...} from universe_lists
+let RU_PARSED = null;  // staged iShares CSV parse for the confirm step
+
+async function loadImportedUniverses() {
+  IMPORTED = {};
+  try {
+    const { data } = await sb.from("universe_lists").select("key,count,imported_at");
+    (data || []).forEach((r) => (IMPORTED[r.key] = { count: r.count, imported_at: r.imported_at }));
+  } catch (e) { /* table readable once logged in */ }
+}
 const uniByKey = (k) => UNIVERSES.find((u) => u.key === k);
 function universeForSlice(slice) { const u = slice && UNIVERSES.find((x) => x.slices.includes(slice)); return u ? u.key : null; }
 // Wall-clock ≈ ~5 min fixed overhead (social + bitcoin steps) + ~2s/ticker fetch.
@@ -224,7 +240,11 @@ function estRuntime(n) { const s = 300 + (n || 1) * 2; return `~${Math.max(5, Ma
 function buildUniversePicker() {
   const row = $("uni-picker");
   row.innerHTML = UNIVERSES.map((u) => {
-    const sz = u.custom ? "" : u.stub ? `<span class="sz">soon</span>` : `<span class="sz">${u.size}</span>`;
+    let sz;
+    if (u.custom) sz = "";
+    else if (u.importable) sz = `<span class="sz">${IMPORTED[u.key] ? IMPORTED[u.key].count : "import"}</span>`;
+    else if (u.stub) sz = `<span class="sz">soon</span>`;
+    else sz = `<span class="sz">${u.size}</span>`;
     return `<div class="uni-chip${u.key === CURRENT_UNIVERSE ? " active" : ""}${u.stub ? " stub" : ""}" data-uni="${u.key}">${esc(u.label)}${sz}</div>`;
   }).join("");
   row.querySelectorAll("[data-uni]").forEach((c) => c.addEventListener("click", () => {
@@ -246,12 +266,21 @@ async function selectUniverse(key) {
   buildUniversePicker();
   const u = uniByKey(key);
   $("uni-custom").classList.toggle("hidden", !u.custom);
+  $("uni-russell").classList.toggle("hidden", !u.importable);
   if (u.custom) loadWatchlist();
+  if (u.importable) renderRussellPanel(u);   // shows import flow or "last imported"
   renderRunControls(u);
   if (u.stub) {
     $("cand-funnel").textContent = "";
     $("cand-meta").textContent = `${u.label} — coming soon`;
-    $("cand-list").innerHTML = `<div class="card muted"><b>${esc(u.label)}</b> (~${u.size} names) isn't available yet — there's no reliable free constituent list (iShares blocks scripted downloads). Coming soon.</div>`;
+    $("cand-list").innerHTML = `<div class="card muted"><b>${esc(u.label)}</b> isn't available yet.</div>`;
+    return;
+  }
+  if (u.importable && !IMPORTED[key]) {
+    // Not imported yet — the import panel above is the whole story.
+    $("cand-funnel").textContent = "";
+    $("cand-meta").textContent = `${u.label} — import its list to enable`;
+    $("cand-list").innerHTML = `<div class="card muted">${esc(u.label)} (~${u.size} names) needs a one-time constituent import — use the panel above.</div>`;
     return;
   }
   const scan = await latestScanForUniverse(key);
@@ -263,7 +292,8 @@ async function selectUniverse(key) {
 
 function renderRunControls(u) {
   const box = $("uni-run");
-  if (u.custom || u.stub) { box.innerHTML = ""; return; }
+  // No run button for: watchlist (own button), stubs, or Russell that isn't imported yet.
+  if (u.custom || u.stub || (u.importable && !IMPORTED[u.key])) { box.innerHTML = ""; return; }
   box.innerHTML = `<button id="uni-run-btn" class="btn secondary small">↻ Run a fresh ${esc(u.label)} scan <span class="dim">(${estRuntime(u.size)})</span></button>`;
   $("uni-run-btn").addEventListener("click", () => requestScan(u));
 }
@@ -285,6 +315,92 @@ async function requestScan(u, customTickers) {
     showToast("Scan requested — it'll run on the engine and appear here when done.");
     $("cand-meta").textContent = `${u.label} — scan requested (${mins})…`;
   } catch (e) { showToast(e.message, "warn"); }
+}
+
+// ---- Russell guided in-app import (iShares holdings CSV) ----
+function renderRussellPanel(u) {
+  const box = $("uni-russell"), imp = IMPORTED[u.key], link = RUSSELL_LINKS[u.key];
+  box.innerHTML = `
+    <div class="card">
+      <div class="big" style="margin-bottom:4px;">${esc(u.label)} — import constituents</div>
+      ${imp ? `<div class="fieldtip" style="margin-bottom:8px;"><b style="color:var(--green)">Imported ${new Date(imp.imported_at).toLocaleDateString()}</b> · ${imp.count} tickers. Re-import only after a rebalance (roughly quarterly).</div>` : ""}
+      <div class="note">Russell lists aren't available automatically, so grab the file once — takes about a minute. You'll only redo this when the index rebalances (roughly quarterly).</div>
+      <a href="${link}" target="_blank" rel="noopener" class="btn secondary small" style="display:inline-block; text-decoration:none; margin-bottom:8px;">Open iShares ${esc(u.label)} page ↗</a>
+      <div class="fieldtip"><b>1.</b> On the iShares page, click <b>"Download Holdings"</b> (near the top right) and save the CSV.<br>
+        <b>2.</b> Tap <b>Choose CSV</b> below and pick that file.<br>
+        <b>3.</b> Confirm the <b>Ticker</b> column, then <b>Import</b>.</div>
+      <input id="ru-file" type="file" accept=".csv,text/csv" class="hidden" />
+      <button id="ru-choose" class="btn secondary" style="width:100%; margin-top:10px;">${imp ? "Re-import CSV…" : "Choose CSV file…"}</button>
+      <div id="ru-mapper" style="margin-top:10px;"></div>
+      <div id="ru-msg" class="center" style="font-size:14px; margin-top:8px;"></div>
+    </div>`;
+  $("ru-choose").addEventListener("click", () => $("ru-file").click());
+  $("ru-file").addEventListener("change", (e) => handleRussellFile(e, u));
+}
+
+async function handleRussellFile(e, u) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  let text;
+  try { text = await file.text(); } catch (err) { $("ru-msg").innerHTML = '<span class="err">Couldn\'t read that file.</span>'; return; }
+  const rows = parseCSV(text);  // reuse the portfolio-import CSV parser
+  // iShares holdings have a metadata preamble; the real header row is the one with a "Ticker" cell.
+  const hi = rows.findIndex((r) => r.some((c) => normH(c) === "ticker"));
+  if (hi < 0) { $("ru-msg").innerHTML = '<span class="err">No "Ticker" column found — is this the iShares holdings CSV?</span>'; return; }
+  RU_PARSED = { headers: rows[hi].map((h) => String(h).trim()), data: rows.slice(hi + 1), u };
+  renderRussellMapper();
+}
+
+function renderRussellMapper() {
+  const { headers, data, u } = RU_PARSED;
+  const opts = (sel, allowNone) => (allowNone ? `<option value="-1">— none —</option>` : "") +
+    headers.map((h, i) => `<option value="${i}" ${i === sel ? "selected" : ""}>${esc(h || "(col " + (i + 1) + ")")}</option>`).join("");
+  $("ru-mapper").innerHTML = `
+    <div class="fieldtip" style="margin-bottom:6px;">Found ${data.length} rows. Confirm the columns:</div>
+    <div class="grid2">
+      <div><label class="fld">Ticker column *</label><select id="ru-tcol">${opts(guessCol(headers, ["ticker"]), false)}</select></div>
+      <div><label class="fld">Asset class (skips cash)</label><select id="ru-acol">${opts(guessCol(headers, ["assetclass", "asset"]), true)}</select></div>
+    </div>
+    <div id="ru-preview" class="fieldtip" style="margin-top:8px;"></div>
+    <button id="ru-import" class="btn" style="width:100%; margin-top:10px;">Import &amp; enable ${esc(u.label)}</button>`;
+  ["ru-tcol", "ru-acol"].forEach((id) => $(id).addEventListener("change", russellPreview));
+  $("ru-import").addEventListener("click", importRussell);
+  russellPreview();
+}
+
+function russellExtract() {
+  const { headers, data } = RU_PARSED;
+  const tCol = +$("ru-tcol").value, acCol = +$("ru-acol").value;
+  const seen = new Set(), tickers = []; let skipped = 0;
+  data.forEach((r) => {
+    const t = String(r[tCol] == null ? "" : r[tCol]).trim().toUpperCase().replace(/\./g, "-");
+    const ac = acCol >= 0 ? String(r[acCol] || "").trim().toLowerCase() : "equity";
+    if ((acCol >= 0 && ac && ac !== "equity") || !/^[A-Z][A-Z0-9\-]{0,9}$/.test(t)) { skipped++; return; }
+    if (!seen.has(t)) { seen.add(t); tickers.push(t); }
+  });
+  return { tickers, skipped };
+}
+function russellPreview() {
+  const { tickers, skipped } = russellExtract();
+  $("ru-preview").innerHTML = `<b style="color:var(--green)">${tickers.length} tickers</b> ready · ${skipped} skipped (cash / non-equity / preamble). e.g. ${esc(tickers.slice(0, 8).join(", "))}`;
+}
+
+async function importRussell() {
+  const u = RU_PARSED.u, { tickers } = russellExtract();
+  if (tickers.length < 50) { $("ru-msg").innerHTML = `<span class="err">Only ${tickers.length} tickers parsed — that doesn't look right. Check the Ticker column.</span>`; return; }
+  $("ru-import").disabled = true;
+  try {
+    const now = new Date().toISOString();
+    const { error } = await sb.from("universe_lists").upsert({
+      key: u.key, tickers: tickers.join(","), count: tickers.length,
+      source: `iShares ${u.label}`, imported_at: now, imported_by: CURRENT_UID,
+    }, { onConflict: "key" });
+    if (error) throw error;
+    IMPORTED[u.key] = { count: tickers.length, imported_at: now };
+    showToast(`${u.label} imported — ${tickers.length} tickers. Now scannable.`);
+    selectUniverse(u.key);  // re-render: imported -> run controls + "last imported" appear
+  } catch (e) { $("ru-import").disabled = false; $("ru-msg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
 async function loadWatchlist() {
