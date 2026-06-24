@@ -48,6 +48,7 @@ async function init() {
   $("al-type").addEventListener("change", alertRuleUI);
   $("al-add").addEventListener("click", addAlert);
   $("disc-ok").addEventListener("click", acknowledgeDisclaimer);
+  $("cc-refresh").addEventListener("click", refreshCrypto);
   $("p-import-btn").addEventListener("click", () => $("p-import-file").click());
   $("p-import-file").addEventListener("change", handleImportFile);
   $("wl-save").addEventListener("click", saveWatchlist);
@@ -159,7 +160,7 @@ function activateTab(name) {
   TABS.forEach((v) => $("view-" + v).classList.toggle("hidden", v !== name));
   // candidates/bitcoin re-fetch on open too (not only at login), so a token-race or
   // transient empty load self-heals when you revisit the tab.
-  const map = { candidates: loadAll, bitcoin: loadAll, frameworks: renderFrameworks, social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
+  const map = { candidates: loadAll, bitcoin: loadCrypto, frameworks: renderFrameworks, social: loadSocial, trades: loadTrades, portfolio: loadPortfolio, tax: loadTax, scorecard: loadScorecard, alerts: loadAlerts, settings: loadSettings };
   if (map[name]) map[name]();
   window.scrollTo(0, 0);
 }
@@ -195,7 +196,6 @@ async function loadAll() {
   }
   await loadImportedUniverses();  // which Russell lists have been imported (universe_lists)
   buildUniversePicker();
-  loadBitcoin(scan);  // Bitcoin is global — tied to the latest overall scan, not the picker
   if (!CURRENT_UNIVERSE) CURRENT_UNIVERSE = universeForSlice(scan && scan.universe_slice) || "sp500";
   selectUniverse(CURRENT_UNIVERSE);  // drives the Candidates list + funnel for the chosen universe
 }
@@ -487,52 +487,265 @@ async function loadCandidates(scan) {
   }
 }
 
-// ---------- Bitcoin ----------
-async function loadBitcoin(scan) {
-  const box = $("btc"); let snap = null;
+// ====================================================================
+// CRYPTO COMMAND CENTER (Bitcoin tab) — live multi-asset, CoinGecko + Alternative.me,
+// with the daily DB bitcoin_snapshot as a graceful fallback (never a blank panel).
+// ====================================================================
+const CC_ASSETS = [
+  { id: "bitcoin", sym: "BTC", name: "Bitcoin" }, { id: "ethereum", sym: "ETH", name: "Ethereum" },
+  { id: "solana", sym: "SOL", name: "Solana" }, { id: "binancecoin", sym: "BNB", name: "BNB" },
+  { id: "ripple", sym: "XRP", name: "XRP" }, { id: "cardano", sym: "ADA", name: "Cardano" },
+  { id: "dogecoin", sym: "DOGE", name: "Dogecoin" },
+];
+const CC_HALVINGS = ["2012-11-28", "2016-07-09", "2020-05-11", "2024-04-19"];
+const CC_NEXT_HALVING = "2028-04-17";  // estimate (~210k blocks / ~4 yr)
+
+// Tunable crypto verdict config — edit to retune BUY / WATCH / AVOID.
+const CRYPTO_VERDICT_CFG = {
+  bands: { buy: 7, watch: 4.5 },              // score >= buy -> BUY; >= watch -> WATCH; else AVOID
+  trend30d: { strong: 20, up: 5, down: -10 }, // 30-day % change
+  trend1y: { strong: 50, weak: -20 },
+  mom7d: { up: 10, down: -10 },               // 7-day momentum
+  fearGreed: { extremeFear: 25, greed: 75 },  // contrarian: buy extreme fear, fade greed
+};
+const CC_PHASE = {
+  accumulation: { label: "Accumulation", color: "var(--teal)", desc: "Quiet and range-bound — the market is building a base. Historically a lower-risk place to accumulate." },
+  bull: { label: "Bull market", color: "var(--green)", desc: "Uptrend underway after the halving — momentum tends to build through this phase." },
+  euphoria: { label: "Euphoria", color: "var(--yellow)", desc: "Late-cycle excitement near the highs with greedy sentiment — historically the riskiest time to buy." },
+  bear: { label: "Bear market", color: "var(--red)", desc: "Deep drawdown / capitulation — painful, but historically where the next cycle's accumulation begins." },
+};
+const CC_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+let CC_SELECTED = "bitcoin", CC_MARKET = null, CC_SOURCE = null, CC_UPDATED = null, CC_SEASON = {}, CC_LOADING = false;
+
+const ccPrice = (p) => p == null ? "—" : "$" + Number(p).toLocaleString(undefined, { maximumFractionDigits: p >= 1 ? 2 : 6 });
+const ccPct = (v) => v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(1) + "%";
+const ccCol = (v) => v == null ? "var(--muted)" : (v >= 0 ? "var(--green)" : "var(--red)");
+
+function halvingMath() {
+  const last = new Date(CC_HALVINGS[CC_HALVINGS.length - 1] + "T00:00:00Z");
+  const next = new Date(CC_NEXT_HALVING + "T00:00:00Z");
+  const now = new Date();
+  const daysSince = Math.floor((now - last) / 86400000);
+  return { last, next, daysSince, daysTo: Math.ceil((next - now) / 86400000), monthsSince: Math.floor(daysSince / 30.44) };
+}
+function computeCycle(athPct, fearGreed) {
+  const hm = halvingMath(), m = hm.monthsSince;
+  let phase = "accumulation";
+  if (athPct != null && athPct > -10 && fearGreed != null && fearGreed >= 70) phase = "euphoria";
+  else if (m <= 18 && (athPct == null || athPct > -40)) phase = "bull";
+  else if ((athPct != null && athPct < -50) || (fearGreed != null && fearGreed < 25)) phase = "bear";
+  return { cyclePhase: phase, ...hm };
+}
+function fgLabelFor(v) {
+  return v == null ? "" : v <= 25 ? "Extreme fear" : v <= 45 ? "Fear" : v <= 55 ? "Neutral" : v <= 75 ? "Greed" : "Extreme greed";
+}
+function cryptoVerdict(a, mkt) {
+  const c = CRYPTO_VERDICT_CFG; let s = 5;
+  if (a.ch30d != null) { if (a.ch30d > c.trend30d.strong) s += 2; else if (a.ch30d > c.trend30d.up) s += 1; else if (a.ch30d < c.trend30d.down) s -= 2; }
+  if (a.ch1y != null) { if (a.ch1y > c.trend1y.strong) s += 1; else if (a.ch1y < c.trend1y.weak) s -= 1; }
+  if (a.ch7d != null) { if (a.ch7d > c.mom7d.up) s += 1; else if (a.ch7d < c.mom7d.down) s -= 1; }
+  if (mkt.fearGreed != null) { if (mkt.fearGreed <= c.fearGreed.extremeFear) s += 1.5; else if (mkt.fearGreed >= c.fearGreed.greed) s -= 1.5; }
+  if (mkt.cyclePhase === "accumulation" || mkt.cyclePhase === "bull") s += 1;
+  else if (mkt.cyclePhase === "euphoria") s -= 1.5; else if (mkt.cyclePhase === "bear") s -= 1;
+  s = Math.max(0, Math.min(10, s));
+  const label = s >= c.bands.buy ? "BUY" : s >= c.bands.watch ? "WATCH" : "AVOID";
+  const color = s >= c.bands.buy ? "var(--green)" : s >= c.bands.watch ? "var(--yellow)" : "var(--red)";
+  return { score: s, label, color };
+}
+
+async function loadCrypto() {
+  buildAssetBar();
+  if (!CC_MARKET) $("cc-body").innerHTML = '<div class="spinner">Loading live crypto data…</div>';
+  await refreshCrypto();
+}
+async function refreshCrypto() {
+  if (CC_LOADING) return;
+  CC_LOADING = true;
+  if ($("cc-refresh")) $("cc-refresh").disabled = true;
   try {
-  if (scan) { const { data } = await sb.from("bitcoin_snapshots").select("*").eq("scan_id", scan.id).limit(1); snap = data && data[0]; }
-  if (!snap) { const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1); snap = data && data[0]; }
-  if (!snap) { box.innerHTML = '<div class="card muted">No Bitcoin snapshot yet.</div>'; return; }
-  const BTC_COMP = {
-    trend: "Is the price above its key moving averages? Above = uptrend (bullish), below = downtrend.",
-    cycle: "Where Bitcoin sits in its ~4-year halving cycle. Mid-cycle is historically bullish; late-cycle = caution.",
-    sentiment: "The crowd's mood (Fear & Greed). Extreme fear can be a contrarian buying chance; extreme greed = caution.",
-    rsi: "Momentum, 0–100. Under 30 = oversold (possible bounce); over 70 = overbought (possible pullback).",
-    seasonality: "How Bitcoin has tended to perform in this calendar month, historically.",
-  };
-  const fng = Number(snap.fear_greed);
-  const fngText = isNaN(fng) ? "" : fng <= 25 ? "Extreme fear — historically a contrarian buy zone"
-    : fng <= 45 ? "Fear" : fng <= 55 ? "Neutral" : fng <= 75 ? "Greed" : "Extreme greed — caution";
-  const cs = Number(snap.composite_score);
-  const comp = (snap.raw && snap.raw.components) || {};
-  const compRows = Object.entries(comp).map(([k, v]) => {
-    const s = Number(v.score || 0);
-    return `<div style="margin-bottom:12px;"><div class="row between" style="font-size:14px;">
-      <span style="text-transform:capitalize; font-weight:600;">${esc(k)}</span><span class="muted">${num(s, 1)}/10 · ${esc(v.note)}</span></div>
-      <div class="bar"><div class="fill" style="width:${(s / 10) * 100}%; background:${convColor(s)}"></div></div>
-      <div class="fieldtip">${esc(BTC_COMP[k] || "")}</div></div>`;
-  }).join("");
-  box.innerHTML = `
-    <div class="card"><div class="row between">
-      <div><div class="dim" style="font-size:12px;">BITCOIN PRICE</div><div class="big">${money(snap.price)}</div></div>
-      <div class="center"><div class="dim" style="font-size:12px;">VERDICT</div>
-        <div class="big" style="color:${convColor(cs)}">${esc(snap.verdict)}</div></div></div>
-      <div class="fieldtip" style="margin-top:8px;"><b>${esc(snap.position_guidance)}</b></div>
-      <div class="fieldtip">Overall score <b style="color:${convColor(cs)}">${num(cs, 1)}/10</b> — higher = more favourable. The verdict turns trend, cycle, sentiment, RSI and seasonality into one action.</div></div>
-    <div class="card"><div class="grid4">
-      <div class="stat"><div class="k">RSI 14</div><div class="v">${num(snap.rsi_14, 0)}</div></div>
-      <div class="stat"><div class="k">Fear / Greed</div><div class="v">${num(snap.fear_greed, 0)} / 100</div></div>
-      <div class="stat"><div class="k">vs all-time high</div><div class="v">${pct(snap.ath_change_pct)}</div></div>
-      <div class="stat"><div class="k">50d / 200d avg</div><div class="v" style="font-size:14px;">${money(snap.ma_50)} / ${money(snap.ma_200)}</div></div></div>
-      <div class="fieldtip" style="margin-top:10px;"><b>Fear &amp; Greed ${num(snap.fear_greed, 0)}/100 — ${fngText}.</b> The index runs 0 (extreme fear) to 100 (extreme greed). Low readings often mark bargains, high readings mark froth.</div>
-      <div class="fieldtip"><b>RSI</b> 0–100 momentum (under 30 oversold, over 70 overbought). <b>vs all-time high</b>: how far below the peak — a big discount can mean opportunity or weakness. <b>50d/200d average</b>: price above these = uptrend.</div>
-      <div class="fieldtip" style="margin-top:8px;">${esc(snap.cycle_phase)}</div></div>
-    ${compRows ? `<div class="card"><div class="dim" style="font-size:12px; margin-bottom:4px;">SIGNAL BREAKDOWN</div>
-      <div class="fieldtip" style="margin-bottom:12px;">Each driver scored 0–10 (higher = more bullish for Bitcoin):</div>${compRows}</div>` : ""}`;
+    CC_MARKET = await fetchCryptoLive(); CC_SOURCE = "live"; CC_UPDATED = new Date();
   } catch (e) {
-    box.innerHTML = `<div class="card err">Couldn't load the Bitcoin read: ${esc(e.message)}</div>`;
+    const snap = await fetchCryptoSnapshot();
+    if (snap) { CC_MARKET = snap; CC_SOURCE = "snapshot"; CC_UPDATED = snap._ts; }
   }
+  CC_LOADING = false;
+  if ($("cc-refresh")) $("cc-refresh").disabled = false;
+  renderCrypto();
+}
+async function fetchCryptoLive() {
+  const ids = CC_ASSETS.map((a) => a.id).join(",");
+  const mkUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&price_change_percentage=24h,7d,30d,1y&sparkline=false`;
+  const [mkRes, glRes, fgRes] = await Promise.all([
+    fetch(mkUrl), fetch("https://api.coingecko.com/api/v3/global").catch(() => null),
+    fetch("https://api.alternative.me/fng/?limit=1").catch(() => null),
+  ]);
+  if (!mkRes.ok) throw new Error("CoinGecko markets " + mkRes.status);
+  const mk = await mkRes.json();
+  const assets = {};
+  mk.forEach((c) => (assets[c.id] = {
+    id: c.id, sym: (c.symbol || "").toUpperCase(), name: c.name, price: c.current_price,
+    ch24: c.price_change_percentage_24h_in_currency, ch7d: c.price_change_percentage_7d_in_currency,
+    ch30d: c.price_change_percentage_30d_in_currency, ch1y: c.price_change_percentage_1y_in_currency,
+    mcap: c.market_cap, rank: c.market_cap_rank, athPct: c.ath_change_percentage,
+  }));
+  let dominanceBtc = null;
+  try { if (glRes && glRes.ok) dominanceBtc = (await glRes.json()).data.market_cap_percentage.btc; } catch (e) {}
+  let fearGreed = null, fgLabel = "";
+  try { if (fgRes && fgRes.ok) { const fg = (await fgRes.json()).data[0]; fearGreed = Number(fg.value); fgLabel = fg.value_classification; } } catch (e) {}
+  const btc = assets.bitcoin || {};
+  return { assets, dominanceBtc, fearGreed, fgLabel: fgLabel || fgLabelFor(fearGreed), ...computeCycle(btc.athPct, fearGreed) };
+}
+async function fetchCryptoSnapshot() {
+  try {
+    const { data } = await sb.from("bitcoin_snapshots").select("*").order("created_at", { ascending: false }).limit(1);
+    const s = data && data[0]; if (!s) return null;
+    const assets = { bitcoin: { id: "bitcoin", sym: "BTC", name: "Bitcoin", price: Number(s.price), athPct: s.ath_change_pct == null ? null : Number(s.ath_change_pct), ch24: null, ch7d: null, ch30d: null, ch1y: null, mcap: null, snapshotOnly: true } };
+    const fg = s.fear_greed == null ? null : Number(s.fear_greed);
+    return { assets, dominanceBtc: null, fearGreed: fg, fgLabel: fgLabelFor(fg), cyclePhaseText: s.cycle_phase, ...computeCycle(s.ath_change_pct, fg), _ts: new Date(s.created_at), snapshot: true };
+  } catch (e) { return null; }
+}
+
+function buildAssetBar() {
+  $("cc-assetbar").innerHTML = CC_ASSETS.map((a) =>
+    `<div class="uni-chip${a.id === CC_SELECTED ? " active" : ""}" data-cc="${a.id}">${a.sym}</div>`).join("");
+  $("cc-assetbar").querySelectorAll("[data-cc]").forEach((c) => c.addEventListener("click", () => {
+    CC_SELECTED = c.dataset.cc; buildAssetBar(); renderCrypto();
+  }));
+}
+
+function renderCrypto() {
+  const m = CC_MARKET, body = $("cc-body");
+  if (!m) { body.innerHTML = '<div class="card err">Couldn\'t reach the live crypto sources and there\'s no saved snapshot yet. Tap Refresh to retry.</div>'; $("cc-updated").textContent = ""; return; }
+  $("cc-updated").innerHTML = CC_SOURCE === "live"
+    ? `<span class="ok">● Live</span> · CoinGecko + Alternative.me · updated ${CC_UPDATED.toLocaleTimeString()}`
+    : `<span style="color:var(--yellow)">● Daily snapshot</span> · live sources unreachable · saved ${CC_UPDATED ? CC_UPDATED.toLocaleString() : "—"}`;
+
+  const a = m.assets[CC_SELECTED] || m.assets.bitcoin;
+  const meta = CC_ASSETS.find((x) => x.id === CC_SELECTED) || {};
+  const v = a ? cryptoVerdict(a, m) : null;
+  const ph = CC_PHASE[m.cyclePhase] || CC_PHASE.accumulation;
+  const hm = halvingMath();
+
+  // panels
+  let html = "";
+  // 1) Headline + verdict
+  if (a) {
+    html += `<div class="verdict-box" style="background:${v.color === "var(--yellow)" ? "rgba(255,217,61,.08)" : v.color === "var(--red)" ? "rgba(255,93,93,.08)" : "rgba(0,255,135,.08)"}; border-color:${v.color};">
+      <div class="guide">How to read: the headline price, how it's moved over four time-frames, and this asset's overall BUY / WATCH / AVOID call.</div>
+      <div class="row between">
+        <div><div class="dim" style="font-size:12px;">${esc((meta.name || a.name || "").toUpperCase())} ${a.snapshotOnly ? "(snapshot)" : ""}</div><div class="xl">${ccPrice(a.price)}</div></div>
+        <div class="center"><div class="dim" style="font-size:12px;">VERDICT</div><div class="xl" style="color:${v.color}">${v.label}</div>
+          <div class="dim" style="font-size:12px;">score ${v.score.toFixed(1)}/10</div></div></div>
+      <div class="grid4" style="margin-top:12px;">
+        ${[["24h", a.ch24], ["7d", a.ch7d], ["30d", a.ch30d], ["1y", a.ch1y]].map(([k, val]) =>
+        `<div class="stat"><div class="k">${k}</div><div class="v" style="color:${ccCol(val)}">${ccPct(val)}</div></div>`).join("")}
+      </div>
+      ${a.snapshotOnly ? `<div class="fieldtip" style="margin-top:8px;">Trend over time isn't in the daily snapshot — tap Refresh when the live source is back for 24h/7d/30d/1y.</div>` : ""}
+    </div>`;
+  }
+  // 2) Cycle position (BTC cycle drives the whole market)
+  html += `<div class="card">
+    <div class="guide">How to read: where Bitcoin sits in its ~4-year cycle — it drives the whole crypto market's risk.</div>
+    <div class="row between"><div class="big">Cycle position</div><span class="pill" style="background:rgba(255,255,255,.06); color:${ph.color}">${ph.label.toUpperCase()}</span></div>
+    <div class="fieldtip" style="margin-top:6px;">${ph.desc}${m.cyclePhaseText ? ` <span class="dim">(daily engine read: ${esc(m.cyclePhaseText)})</span>` : ""}</div></div>`;
+  // 3) Halving clock
+  html += `<div class="card">
+    <div class="guide">How to read: Bitcoin's supply halves roughly every 4 years; past cycles peaked 12–18 months after a halving.</div>
+    <div class="big" style="margin-bottom:6px;">Halving clock</div>
+    <div class="grid3">
+      <div class="stat"><div class="k">Since last halving</div><div class="v">${hm.daysSince} days</div></div>
+      <div class="stat"><div class="k">To next (est.)</div><div class="v">${hm.daysTo} days</div></div>
+      <div class="stat"><div class="k">Cycle month</div><div class="v">${hm.monthsSince} / ~48</div></div></div>
+    <div class="fieldtip" style="margin-top:8px;">Last halving Apr 2024; next ≈ Apr 2028. Historically the ~12–18 months after a halving have been the strongest, with the cycle top followed by a deep bear.</div></div>`;
+  // 4) Fear & Greed
+  const fg = m.fearGreed;
+  html += `<div class="card">
+    <div class="guide">How to read: the crowd's mood, 0 (extreme fear) to 100 (extreme greed). Extremes are often contrarian signals.</div>
+    <div class="row between"><div class="big">Fear &amp; Greed</div><div class="big" style="color:${fg == null ? "var(--muted)" : fg <= 45 ? "var(--red)" : fg <= 55 ? "var(--yellow)" : "var(--green)"}">${fg == null ? "—" : fg + " / 100"}</div></div>
+    <div class="bar" style="margin-top:8px;"><div class="fill" style="width:${fg == null ? 0 : fg}%; background:${fg == null ? "var(--dim)" : fg <= 25 ? "var(--red)" : fg <= 45 ? "var(--yellow)" : fg <= 75 ? "var(--teal)" : "var(--green)"}"></div></div>
+    <div class="fieldtip" style="margin-top:6px;"><b>${esc(m.fgLabel || fgLabelFor(fg))}.</b> Extreme fear has often marked bargains; extreme greed marks froth.</div></div>`;
+  // 5) Seasonality (lazy)
+  html += `<div class="card" id="cc-season">
+    <div class="guide">How to read: how ${esc(meta.sym || "this asset")} has performed in each calendar month on average — which months tend strong vs weak.</div>
+    <div class="big" style="margin-bottom:6px;">Seasonality — ${esc(meta.name || "")}</div>
+    <div id="cc-season-body" class="spinner" style="padding:10px 0;">Loading history…</div></div>`;
+  // 6) Multi-asset table
+  html += renderCryptoTable(m);
+
+  body.innerHTML = html;
+  renderSeasonality();  // fills #cc-season-body
+}
+
+function renderCryptoTable(m) {
+  const head = `<tr><th class="l">Asset</th><th>Price</th><th>24h</th><th>7d</th><th>30d</th><th class="l">Verdict</th></tr>`;
+  const rows = CC_ASSETS.map((meta) => {
+    const a = m.assets[meta.id];
+    if (!a) return `<tr><td class="l">${meta.sym}</td><td colspan="5" class="l dim">live only — refresh</td></tr>`;
+    const v = cryptoVerdict(a, m);
+    const sel = meta.id === CC_SELECTED ? ' style="background:rgba(255,255,255,.04)"' : "";
+    return `<tr${sel}><td class="l"><b>${meta.sym}</b> <span class="dim">${a.rank ? "#" + a.rank : ""}</span></td>
+      <td>${ccPrice(a.price)}</td>
+      <td style="color:${ccCol(a.ch24)}">${ccPct(a.ch24)}</td>
+      <td style="color:${ccCol(a.ch7d)}">${ccPct(a.ch7d)}</td>
+      <td style="color:${ccCol(a.ch30d)}">${ccPct(a.ch30d)}</td>
+      <td class="l"><span style="color:${v.color}; font-weight:700">${v.label}</span></td></tr>`;
+  }).join("");
+  const dom = m.dominanceBtc != null ? `BTC dominance <b>${m.dominanceBtc.toFixed(1)}%</b> · ` : "";
+  return `<div class="card">
+    <div class="guide">How to read: every tracked asset at a glance — price, recent trend, and each one's verdict. Tap a chip up top to focus one.</div>
+    <div class="big" style="margin-bottom:6px;">All assets</div>
+    <div class="fieldtip" style="margin-bottom:8px;">${dom}tap an asset chip above to load its panels.</div>
+    <div class="scrollx"><table class="tax">${head}${rows}</table></div></div>`;
+}
+
+async function renderSeasonality() {
+  const box = document.getElementById("cc-season-body");
+  if (!box) return;
+  const id = CC_SELECTED;
+  let s = CC_SEASON[id];
+  if (!s) { s = await loadSeasonality(id); }
+  const target = document.getElementById("cc-season-body");
+  if (!target) return;
+  if (!s || !s.avg) { target.innerHTML = '<div class="dim">Historical seasonality unavailable (source down) — tap Refresh later.</div>'; return; }
+  const vals = CC_MONTHS.map((_, i) => s.avg[i]);
+  const max = Math.max(1, ...vals.map((x) => Math.abs(x || 0)));
+  const bars = CC_MONTHS.map((mo, i) => {
+    const x = vals[i];
+    const w = x == null ? 0 : (Math.abs(x) / max) * 100;
+    const col = x == null ? "var(--dim)" : x >= 0 ? "var(--green)" : "var(--red)";
+    return `<div class="row" style="gap:8px; margin:3px 0; font-size:12px;">
+      <div style="width:30px; color:var(--muted)">${mo}</div>
+      <div class="bar" style="flex:1; background:var(--panel2)"><div class="fill" style="width:${w}%; background:${col}"></div></div>
+      <div style="width:52px; text-align:right; color:${col}">${x == null ? "—" : ccPct(x)}</div></div>`;
+  }).join("");
+  const best = vals.map((x, i) => [i, x]).filter((p) => p[1] != null).sort((a, b) => b[1] - a[1]);
+  const note = best.length ? `Strongest historically: <b style="color:var(--green)">${CC_MONTHS[best[0][0]]}</b>; weakest: <b style="color:var(--red)">${CC_MONTHS[best[best.length - 1][0]]}</b> (avg over ${s.years || "?"} months of data).` : "";
+  target.innerHTML = bars + `<div class="fieldtip" style="margin-top:8px;">${note} Seasonality is a tendency, not a guarantee.</div>`;
+}
+
+async function loadSeasonality(id) {
+  if (CC_SEASON[id]) return CC_SEASON[id];
+  try {
+    const r = await fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=max&interval=daily`);
+    if (!r.ok) throw new Error("history " + r.status);
+    const prices = (await r.json()).prices || [];
+    const byMonth = {};
+    prices.forEach(([ts, p]) => { const d = new Date(ts); byMonth[d.getUTCFullYear() + "-" + d.getUTCMonth()] = p; });
+    const keys = Object.keys(byMonth).sort((a, b) => {
+      const [ay, am] = a.split("-").map(Number), [by, bm] = b.split("-").map(Number);
+      return ay - by || am - bm;
+    });
+    const monthRet = {};
+    for (let i = 1; i < keys.length; i++) {
+      const prev = byMonth[keys[i - 1]], cur = byMonth[keys[i]];
+      if (prev > 0) { const mi = Number(keys[i].split("-")[1]); (monthRet[mi] = monthRet[mi] || []).push((cur - prev) / prev * 100); }
+    }
+    const avg = {};
+    for (let mo = 0; mo < 12; mo++) { const arr = monthRet[mo] || []; avg[mo] = arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : null; }
+    CC_SEASON[id] = { avg, years: keys.length };
+  } catch (e) { CC_SEASON[id] = { avg: null }; }
+  return CC_SEASON[id];
 }
 
 // ====================================================================

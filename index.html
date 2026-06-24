@@ -205,11 +205,15 @@
       <div id="cand-list"><div class="spinner">Loading…</div></div>
     </section>
 
-    <!-- BITCOIN -->
+    <!-- CRYPTO COMMAND CENTER -->
     <section id="view-bitcoin" class="hidden">
-      <div class="guide">Tracking BTC cycle, trend, and Fear &amp; Greed — where Bitcoin sits in its market cycle right now.</div>
-      <div class="note">A full read on Bitcoin — trend, halving cycle, sentiment and seasonality combined into one <b>verdict</b>. Higher composite score (0–10) = more favourable. The breakdown shows what's driving it.</div>
-      <div id="btc"><div class="spinner">Loading…</div></div>
+      <div class="guide">A live crypto command center — pick an asset up top; each panel explains how to read it. Numbers refresh on demand, or fall back to the daily saved snapshot if a source is down.</div>
+      <div id="cc-assetbar" class="uni-row"></div>
+      <div class="row between" style="margin-bottom:8px;">
+        <div class="muted" id="cc-updated" style="font-size:13px;"></div>
+        <button id="cc-refresh" class="btn secondary small">Refresh</button>
+      </div>
+      <div id="cc-body"><div class="spinner">Loading…</div></div>
     </section>
 
     <!-- ANALYZER -->
@@ -388,7 +392,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!-- ?v= cache-buster: bump on every deploy so browsers never serve a stale app.js/config.js -->
-<script src="./config.js?v=20260624-3"></script>
-<script src="./app.js?v=20260624-3"></script>
+<script src="./config.js?v=20260624-4"></script>
+<script src="./app.js?v=20260624-4"></script>
 </body>
 </html>
